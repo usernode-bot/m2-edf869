@@ -181,4 +181,11 @@ Re-theme by changing the token values there, keeping every text pair at
 - Maps nest 10 levels deep (`MAX_DEPTH`; the central idea is level 0). A
   new idea is placed past the end of its parent's drawn width (measured on
   the page, estimated from the text elsewhere), so deep chains never overlap.
+- Links are named lines between any two ideas, outside the tree: the
+  optional `doc.links` array (`{ id, from, to, text }`, an empty text is an
+  unnamed link drawn as a dot), validated by the same `map-model.js`. They
+  have no direction (two ideas are linked once), are drawn muted and dashed
+  so they never pass for a branch, and go with either idea when it is
+  deleted (`removeSubtree` carries them for Undo). At most 200 a map, names
+  up to 60 characters.
 - Avoid adding new dependencies; express, pg and jsonwebtoken cover it.

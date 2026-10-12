@@ -189,6 +189,79 @@
   .w2 { stroke-width: 3; }
   .w3 { stroke-width: 2; }
 
+  /* Links: a thin muted dashed line between two ideas, set apart from the
+     coloured solid branches, with its name in the middle on a ground-coloured
+     tag. An unnamed link shows a small dot instead, so there is always
+     something to tap. */
+  .link-line {
+    fill: none;
+    stroke: rgb(var(--muted));
+    stroke-width: 1.5;
+    stroke-dasharray: 6 5;
+    stroke-linecap: round;
+  }
+  .link-labels {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 0;
+    height: 0;
+  }
+  .link-label {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    background: rgb(var(--ground));
+    color: rgb(var(--muted));
+    border: 0;
+    border-radius: 6px;
+    padding: 0 6px;
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  /* The tag stays small on the paper; this widens what a finger can hit to
+     at least 44 px each way without drawing anything. Ideas sit above it, so
+     they win, except over two overlapping ideas (.is-over below). */
+  .link-label::before {
+    content: '';
+    position: absolute;
+    inset: -12px -4px;
+    min-width: 44px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: calc(100% + 8px);
+  }
+  /* With its two ideas overlapping there is no line, and the label sits over
+     them so it can still be tapped. */
+  .link-label.is-over {
+    z-index: 1;
+  }
+  .link-label:focus-visible {
+    outline: 2px solid rgb(var(--focus));
+    outline-offset: 2px;
+  }
+  .link-label.is-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border-radius: 999px;
+  }
+  .link-label.is-empty::before {
+    inset: -10px;
+  }
+  .link-label.is-empty::after {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: rgb(var(--muted));
+  }
+
   /* Ideas: three tiers — the ink pill, the outlined pill, underlined text. */
   .idea {
     position: absolute;
@@ -417,8 +490,24 @@
     display: flex;
     gap: 8px;
   }
-  .actions .btn-primary {
+  .actions .btn-primary,
+  .actions .btn-wide {
     flex: 1;
+  }
+  /* Rename, Delete and Link: on a phone, icons only so Add idea keeps its
+     room. The words stay for screen readers. */
+  @media (max-width: 479px) {
+    .btn-tool {
+      padding: 0;
+    }
+    .btn-tool .btn-label {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+    }
   }
 
   /* A map thumbnail on Your maps: the same drawing in miniature. */

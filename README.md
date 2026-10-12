@@ -19,7 +19,9 @@ finds it under "Shared with you" on Your maps.
 - `public/js/map-model.js` is the map model, shared by the page and the
   server (`server.js` requires it), so both validate a map the same way.
   A map is one JSONB document: `{ v: 1, nodes: [{ id, parent, text, x, y,
-  color }] }`, exactly one root at 0,0, colour on main ideas only.
+  color }] }`, exactly one root at 0,0, colour on main ideas only. An
+  optional `links: [{ id, from, to, text }]` holds named lines between any
+  two ideas, drawn dashed apart from the tree.
 - `public/js/canvas.js` draws and edits one map; `public/js/maps-list.js`
   draws Your maps; `public/js/app.js` routes between them and runs the
   autosave queue (700 ms debounce, one PUT in flight, retrying after

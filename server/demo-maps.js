@@ -6,7 +6,8 @@
 const M2Model = require('../public/js/map-model');
 
 // Lisbon weekend, exactly as the spec drew screen 1: root at 0,0, the mock's
-// coordinates minus (250, 420).
+// coordinates minus (250, 420). One example link, Check-in 3pm to Flights
+// €180; the straight line between them clears the Stay and Budget pills.
 function lisbonDoc() {
   return {
     v: 1,
@@ -31,6 +32,7 @@ function lisbonDoc() {
       { id: 'e2', parent: 'e1', text: 'Flights €180', x: 82, y: 295 },
       { id: 'e3', parent: 'e1', text: '€40 a day', x: 82, y: 345 },
     ],
+    links: [{ id: 'l1', from: 'd3', to: 'e2', text: 'Arrive in time' }],
   };
 }
 

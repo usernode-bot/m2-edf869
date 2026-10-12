@@ -21,6 +21,7 @@
     bin: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>',
     plus: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
     share: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg>',
+    link: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5"/></svg>',
   };
 
   function el(tag, cls, text) {
@@ -102,14 +103,19 @@
     var d = opts.doc;
     var readOnly = !!opts.readOnly;
     var selectedId = null;
+    var linkingFrom = null; // the idea a link starts from, while Link waits for the other
     var tx = 0, ty = 0, scale = 1;
     var els = new Map(); // node id -> button
+    var linkEls = new Map(); // link id -> label button
 
+    // The world, back to front: branches and link lines, link labels, ideas.
     var rootEl = el('div', 'canvas');
     var world = el('div', 'world');
     var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('class', 'branches');
     world.appendChild(svg);
+    var labelLayer = el('div', 'link-labels');
+    world.appendChild(labelLayer);
     rootEl.appendChild(world);
 
     // Top bar: Maps, the demo and View only pills, save status, Share and Fit.
@@ -150,27 +156,40 @@
     topbar.appendChild(topRight);
     rootEl.appendChild(topbar);
 
-    // Bottom bar: the selection line, then Rename, Delete and Add idea. A
-    // read-only view has none of it.
-    var bar = null, selLine, renameBtn, deleteBtn, addBtn;
+    // Bottom bar: the selection line, then Rename, Delete, Link and Add idea,
+    // or only Cancel while a link waits for its second idea. The three tool
+    // buttons drop their words on a phone (.btn-tool), keeping them for
+    // screen readers. A read-only view has none of it.
+    var bar = null, selLine, renameBtn, deleteTool, deleteBtn, linkBtn, addBtn, cancelBtn;
     if (!readOnly) {
       bar = el('div', 'bottom-bar');
       selLine = el('div', 'selection');
       bar.appendChild(selLine);
       var actions = el('div', 'actions');
-      renameBtn = el('button', 'btn-secondary');
-      renameBtn.type = 'button';
-      renameBtn.appendChild(icon('pencil'));
-      renameBtn.appendChild(document.createTextNode('Rename'));
-      deleteBtn = el('button', 'btn-secondary');
-      deleteBtn.type = 'button';
+      var toolButton = function (name, text) {
+        var b = el('button', 'btn-secondary btn-tool');
+        b.type = 'button';
+        b.appendChild(icon(name));
+        var label = el('span', 'btn-label', text);
+        b.appendChild(label);
+        return { btn: b, label: label };
+      };
+      renameBtn = toolButton('pencil', 'Rename').btn;
+      deleteTool = toolButton('bin', 'Delete');
+      deleteBtn = deleteTool.btn;
+      linkBtn = toolButton('link', 'Link').btn;
       addBtn = el('button', 'btn-primary');
       addBtn.type = 'button';
       addBtn.appendChild(icon('plus'));
       addBtn.appendChild(document.createTextNode('Add idea'));
+      cancelBtn = el('button', 'btn-secondary btn-wide', 'Cancel');
+      cancelBtn.type = 'button';
+      cancelBtn.hidden = true;
       actions.appendChild(renameBtn);
       actions.appendChild(deleteBtn);
+      actions.appendChild(linkBtn);
       actions.appendChild(addBtn);
+      actions.appendChild(cancelBtn);
       bar.appendChild(actions);
       rootEl.appendChild(bar);
     }
@@ -236,6 +255,18 @@
         world.appendChild(b);
         els.set(n.id, b);
       });
+      // One label per link; drawBranches() only moves them, so a drag keeps
+      // focus where it is.
+      linkEls.forEach(function (old) { if (old.parentNode) old.parentNode.removeChild(old); });
+      linkEls.clear();
+      M.links(d).forEach(function (l) {
+        var b = el('button', 'link-label');
+        b.type = 'button';
+        b.dataset.link = l.id;
+        labelLayer.appendChild(b);
+        linkEls.set(l.id, b);
+      });
+      labelLinks();
       // Branch ends need the measured text widths, so draw after layout.
       requestAnimationFrame(drawBranches);
       drawBranchesSoon();
@@ -245,6 +276,19 @@
     function drawBranchesSoon() {
       if (branchFrame) return;
       branchFrame = requestAnimationFrame(function () { branchFrame = 0; drawBranches(); });
+    }
+
+    // A link label's words: its name (or a dot when it has none), and the two
+    // ideas it joins for screen readers. Rerun when an idea is renamed.
+    function labelLinks() {
+      M.links(d).forEach(function (l) {
+        var b = linkEls.get(l.id);
+        var a = M.node(d, l.from), z = M.node(d, l.to);
+        if (!b || !a || !z) return;
+        b.textContent = l.text;
+        b.classList.toggle('is-empty', !l.text);
+        b.setAttribute('aria-label', 'Link between ' + a.text + ' and ' + z.text + (l.text ? ', ' + l.text : ''));
+      });
     }
 
     function widthOf(n) {
@@ -276,7 +320,49 @@
         paths += '<path class="' + cls + '" d="M' + s[0] + ' ' + s[1] +
           'C' + mx + ' ' + s[1] + ', ' + mx + ' ' + n.y + ', ' + n.x + ' ' + n.y + '"/>';
       });
+      M.links(d).forEach(function (l) {
+        var seg = linkSegment(l);
+        var b = linkEls.get(l.id);
+        if (seg && seg.line) {
+          var ln = seg.line;
+          paths += '<path class="link-line" d="M' + ln[0] + ' ' + ln[1] + 'L' + ln[2] + ' ' + ln[3] + '"/>';
+        }
+        // The label stays even when the line cannot be drawn, lifted over
+        // the overlapping ideas, so the link can always be tapped to rename
+        // or delete it.
+        if (b && seg) {
+          b.style.left = seg.mid[0] + 'px';
+          b.style.top = seg.mid[1] + 'px';
+          b.classList.toggle('is-over', !seg.line);
+        }
+      });
       svg.innerHTML = paths; // coordinates and class names only, never user text
+    }
+
+    // The straight line between two linked ideas, from where it leaves one
+    // box to where it meets the other, 4 px short of each, and where its
+    // label goes: { line: [x1, y1, x2, y2] rounded to 0.1 px, mid: [x, y] }.
+    // When the boxes overlap there is no gap to draw in: line is null and
+    // the label sits midway between the two box centres. Null before the
+    // ideas are drawn.
+    function linkSegment(l) {
+      var a = M.node(d, l.from), z = M.node(d, l.to);
+      var ba = a && boxOf(a), bz = z && boxOf(z);
+      if (!ba || !bz) return null;
+      var ax = ba.x + ba.w / 2, ay = ba.y + ba.h / 2;
+      var zx = bz.x + bz.w / 2, zy = bz.y + bz.h / 2;
+      var dx = zx - ax, dy = zy - ay;
+      // How far along the centre line (0 to 1) each box ends.
+      function exit(b) {
+        var ex = dx ? (b.w / 2 + 4) / Math.abs(dx) : Infinity;
+        var ey = dy ? (b.h / 2 + 4) / Math.abs(dy) : Infinity;
+        return Math.min(ex, ey);
+      }
+      var t0 = exit(ba), t1 = 1 - exit(bz);
+      var r = function (v) { return Math.round(v * 10) / 10; };
+      if (!(t0 < t1)) return { line: null, mid: [r((ax + zx) / 2), r((ay + zy) / 2)] };
+      var line = [r(ax + dx * t0), r(ay + dy * t0), r(ax + dx * t1), r(ay + dy * t1)];
+      return { line: line, mid: [(line[0] + line[2]) / 2, (line[1] + line[3]) / 2] };
     }
 
     // ── View transforms ──────────────────────────────────────────────────
@@ -293,24 +379,32 @@
       return [(px - tx) / scale, (py - ty) / scale];
     }
 
+    // One idea's drawn box in world coordinates, or null before it is drawn:
+    // a pill is centred on its anchor, an outer idea's text runs left or right
+    // of it, by the side it grows on.
+    function boxOf(n) {
+      var b = els.get(n.id);
+      if (!b) return null;
+      var w = b.offsetWidth, hh = b.offsetHeight;
+      var x0;
+      if (M.isPill(d, n.id)) x0 = n.x - w / 2;
+      else {
+        var p = M.node(d, n.parent);
+        x0 = p && n.x < p.x ? n.x - w : n.x;
+      }
+      return { x: x0, y: n.y - hh / 2, w: w, h: hh };
+    }
+
     // The bounding box of every idea, in world coordinates.
     function bounds() {
       var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       var any = false;
       M.nodes(d).forEach(function (n) {
-        var b = els.get(n.id);
-        if (!b) return;
+        var box = boxOf(n);
+        if (!box) return;
         any = true;
-        var w = b.offsetWidth, hh = b.offsetHeight;
-        var x0, y0;
-        if (M.isPill(d, n.id)) { x0 = n.x - w / 2; y0 = n.y - hh / 2; }
-        else {
-          var p = M.node(d, n.parent);
-          x0 = p && n.x < p.x ? n.x - w : n.x;
-          y0 = n.y - hh / 2;
-        }
-        minX = Math.min(minX, x0); minY = Math.min(minY, y0);
-        maxX = Math.max(maxX, x0 + w); maxY = Math.max(maxY, y0 + hh);
+        minX = Math.min(minX, box.x); minY = Math.min(minY, box.y);
+        maxX = Math.max(maxX, box.x + box.w); maxY = Math.max(maxY, box.y + box.h);
       });
       if (!any) return { x: -100, y: -60, w: 200, h: 120 };
       return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
@@ -352,10 +446,13 @@
 
     // ── Gestures ─────────────────────────────────────────────────────────
     var pointers = new Map();
-    var gesture = null; // {kind:'pan'|'drag'|'pinch', ...}
+    var gesture = null; // {kind:'pan'|'maybe-drag'|'drag'|'link-tap'|'pinch', ...}
     var lastTap = { id: null, at: 0 };
 
     rootEl.addEventListener('pointerdown', function (e) {
+      // The bars float over the paper; a press on them is not a tap on it
+      // (one used to clear the selection before Rename or Link could act).
+      if (e.target.closest && e.target.closest('.topbar, .bottom-bar')) return;
       if (pointers.size === 2) return;
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (pointers.size === 2) {
@@ -367,8 +464,11 @@
         return;
       }
       // Read only, an idea is just more paper: dragging it pans the map.
+      var labelEl = !readOnly && e.target.closest ? e.target.closest('.link-label') : null;
       var ideaEl = !readOnly && e.target.closest ? e.target.closest('.idea') : null;
-      if (ideaEl) {
+      if (labelEl) {
+        gesture = { kind: 'link-tap', id: labelEl.dataset.link, x: e.clientX, y: e.clientY, moved: false };
+      } else if (ideaEl) {
         gesture = { kind: 'maybe-drag', id: ideaEl.dataset.id, x: e.clientX, y: e.clientY, moved: false };
       } else {
         gesture = { kind: 'pan', x: e.clientX, y: e.clientY, moved: false };
@@ -393,6 +493,11 @@
         return;
       }
       var dx = e.clientX - gesture.x, dy = e.clientY - gesture.y;
+      if (gesture.kind === 'link-tap') {
+        // A press on a link's name that moves pans the paper instead.
+        if (Math.hypot(dx, dy) < 6) return;
+        gesture.kind = 'pan';
+      }
       if (gesture.kind === 'pan') {
         if (!gesture.moved && Math.hypot(dx, dy) < 6) return;
         gesture.moved = true;
@@ -400,7 +505,7 @@
         ty += e.clientY - (gesture.lastY == null ? gesture.y : gesture.lastY);
         gesture.lastX = e.clientX; gesture.lastY = e.clientY;
         applyTransform();
-      } else if (gesture.kind === 'maybe-drag') {
+      } else if (gesture.kind === 'maybe-drag' || gesture.kind === 'drag') {
         if (!gesture.moved && Math.hypot(dx, dy) < 6) return;
         if (!gesture.moved) {
           gesture.moved = true;
@@ -430,15 +535,22 @@
       } else if (gesture.kind === 'maybe-drag' && !gesture.moved) {
         var id = gesture.id;
         var now = Date.now();
-        if (lastTap.id === id && now - lastTap.at < 300) {
+        if (linkingFrom) {
+          finishLink(id); // the second idea of a link, not a selection
+          lastTap = { id: null, at: 0 };
+        } else if (lastTap.id === id && now - lastTap.at < 300) {
           openRename(id);
           lastTap = { id: null, at: 0 };
         } else {
           lastTap = { id: id, at: now };
           select(id);
         }
+      } else if (gesture.kind === 'link-tap') {
+        if (!linkingFrom) openLink(gesture.id);
       } else if (gesture.kind === 'pan' && !gesture.moved && !readOnly) {
-        select(null); // a tap on the dotted paper clears the selection
+        // A tap on the dotted paper stops a link, or else clears the selection.
+        if (linkingFrom) cancelLink();
+        else select(null);
       }
       gesture = null;
     }
@@ -467,6 +579,7 @@
         els.get(selectedId).removeAttribute('aria-pressed');
       }
       selectedId = id;
+      linkingFrom = null;
       if (id && els.get(id)) {
         els.get(id).classList.add('is-selected');
         els.get(id).setAttribute('aria-pressed', 'true');
@@ -489,18 +602,16 @@
       var n = selNode();
       var full = M.ideaCount(d) >= M.MAX_NODES;
       var deepest = !!n && !M.canAddUnder(d, n.id);
+      var linking = !!n && linkingFrom === n.id;
       addBtn.disabled = full || deepest;
-      if (full) {
+      if (linking) {
+        selLine.appendChild(dotFor(n));
+        selLine.appendChild(el('span', 'sel-name', n.text));
+        selLine.appendChild(el('span', 'sel-meta', 'Tap another idea to link to it'));
+      } else if (full) {
         selLine.appendChild(el('span', 'sel-meta', 'This map is full (500 ideas)'));
       } else if (n) {
-        var dot = el('span', 'dot');
-        if (n.id !== 'root') {
-          var c = M.branchColor(d, n.id);
-          dot.classList.add(DOT_CLASSES[c == null ? 0 : c]);
-        } else {
-          dot.classList.add('bg-accent');
-        }
-        selLine.appendChild(dot);
+        selLine.appendChild(dotFor(n));
         selLine.appendChild(el('span', 'sel-name', n.text));
         selLine.appendChild(el('span', 'sel-meta', deepest
           ? 'Ideas go ' + M.MAX_DEPTH + ' levels deep'
@@ -509,15 +620,33 @@
         selLine.appendChild(el('span', 'sel-meta', 'Tap an idea to select it'));
       }
       var isRoot = n && n.id === 'root';
-      renameBtn.hidden = !n;
-      deleteBtn.hidden = !n;
-      deleteBtn.textContent = '';
-      deleteBtn.appendChild(icon('bin'));
-      deleteBtn.appendChild(document.createTextNode(isRoot ? 'Delete map' : 'Delete'));
+      renameBtn.hidden = !n || linking;
+      deleteBtn.hidden = !n || linking;
+      deleteTool.label.textContent = isRoot ? 'Delete map' : 'Delete';
+      linkBtn.hidden = !n || linking;
+      linkBtn.disabled = M.links(d).length >= M.MAX_LINKS;
+      addBtn.hidden = linking;
+      cancelBtn.hidden = !linking;
+    }
+
+    // The selection line's dot, in the branch's colour (ink for the centre).
+    function dotFor(n) {
+      var dot = el('span', 'dot');
+      if (n.id !== 'root') {
+        var c = M.branchColor(d, n.id);
+        dot.classList.add(DOT_CLASSES[c == null ? 0 : c]);
+      } else {
+        dot.classList.add('bg-accent');
+      }
+      return dot;
     }
 
     // ── Sheets ───────────────────────────────────────────────────────────
-    function sheetForm(labelText, placeholder, value, buttonLabel, maxlength, onSubmit) {
+    // `options.allowEmpty` lets an empty field through (a link's name);
+    // `options.extra` ({ label, onClick }) adds a secondary button under the
+    // primary one that closes the sheet and runs onClick.
+    function sheetForm(labelText, placeholder, value, buttonLabel, maxlength, onSubmit, options) {
+      options = options || {};
       var form = el('form');
       form.style.cssText = 'display:flex;flex-direction:column;gap:12px;padding:4px 4px 12px';
       var label = el('label', 'section-label', labelText);
@@ -529,15 +658,26 @@
       label.htmlFor = input.id = 'sheet-field';
       var btn = el('button', 'btn-primary', buttonLabel);
       btn.type = 'submit';
-      btn.disabled = !input.value.trim();
-      input.addEventListener('input', function () { btn.disabled = !input.value.trim(); });
+      if (!options.allowEmpty) {
+        btn.disabled = !input.value.trim();
+        input.addEventListener('input', function () { btn.disabled = !input.value.trim(); });
+      }
       form.appendChild(label);
       form.appendChild(input);
       form.appendChild(btn);
+      if (options.extra) {
+        var extra = el('button', 'btn-secondary', options.extra.label);
+        extra.type = 'button';
+        extra.addEventListener('click', function () {
+          handle.dismiss();
+          options.extra.onClick();
+        });
+        form.appendChild(extra);
+      }
       form.addEventListener('submit', function (e) {
         e.preventDefault();
         var v = input.value.trim();
-        if (!v) return;
+        if (!v && !options.allowEmpty) return;
         handle.dismiss();
         onSubmit(v);
       });
@@ -570,6 +710,7 @@
         M.rename(d, n.id, text);
         var b = els.get(n.id);
         if (b) b.textContent = text;
+        labelLinks(); // their screen-reader names say which ideas they join
         commit();
       });
     }
@@ -609,9 +750,80 @@
       });
     }
 
+    // ── Links ────────────────────────────────────────────────────────────
+    // Link waits for a second idea; tapping it (or Enter on it) asks for an
+    // optional name. Cancel, the paper or Escape stop without linking, and the
+    // first idea stays selected.
+    function startLink() {
+      var n = selNode();
+      if (!n || M.links(d).length >= M.MAX_LINKS) return;
+      linkingFrom = n.id;
+      renderBar();
+      cancelBtn.focus(); // the one button left, and where Escape is heard
+    }
+
+    function cancelLink() {
+      if (!linkingFrom) return;
+      var refocus = document.activeElement === cancelBtn;
+      linkingFrom = null;
+      renderBar();
+      if (refocus) linkBtn.focus();
+    }
+
+    function finishLink(id) {
+      var from = linkingFrom;
+      if (!from || id === from) return; // the same idea: keep waiting
+      linkingFrom = null;
+      renderBar();
+      if (M.linkBetween(d, from, id)) {
+        un.toast('These ideas are already linked');
+        return;
+      }
+      sheetForm('Link name', 'e.g. Depends on', '', 'Add link', M.MAX_LINK_TEXT, function (text) {
+        if (!M.addLink(d, from, id, text)) return;
+        render(); // the first idea stays selected
+        commit();
+      }, { allowEmpty: true });
+    }
+
+    // A tap on a link's name (or dot): rename it, or delete it with Undo.
+    function openLink(id) {
+      var l = M.linkById(d, id);
+      if (!l) return;
+      sheetForm('Link name', 'e.g. Depends on', l.text, 'Save', M.MAX_LINK_TEXT, function (text) {
+        M.renameLink(d, id, text);
+        render();
+        commit();
+      }, {
+        allowEmpty: true,
+        extra: {
+          label: 'Delete link',
+          onClick: function () {
+            var removed = M.removeLink(d, id);
+            if (!removed) return;
+            render();
+            commit();
+            un.toast('Deleted link', {
+              priority: true,
+              action: {
+                label: 'Undo',
+                handler: function () {
+                  M.restoreLinks(d, [removed]);
+                  render();
+                  commit();
+                },
+              },
+            });
+          },
+        },
+      });
+    }
+
     if (bar) {
       renameBtn.addEventListener('click', function () { openRename(); });
       deleteBtn.addEventListener('click', openDelete);
+      linkBtn.addEventListener('click', startLink);
+      cancelBtn.addEventListener('click', cancelLink);
       addBtn.addEventListener('click', openAdd);
     }
 
@@ -622,6 +834,19 @@
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
       var focused = e.target.closest ? e.target.closest('.idea') : null;
       var focusedId = focused ? focused.dataset.id : null;
+      var focusedLink = e.target.closest ? e.target.closest('.link-label') : null;
+      if (linkingFrom) {
+        // While a link waits, Enter on an idea finishes it and Escape stops
+        // it. Arrows still move the selected idea; the shortcuts for the
+        // hidden buttons wait.
+        if (e.key === 'Enter' && focusedId) { finishLink(focusedId); e.preventDefault(); }
+        else if (e.key === 'Escape') { cancelLink(); e.preventDefault(); }
+        if (e.key.indexOf('Arrow') !== 0) return;
+      } else if (focusedLink && (e.key === 'Enter' || e.key === ' ')) {
+        openLink(focusedLink.dataset.link);
+        e.preventDefault();
+        return;
+      }
       if (e.key === 'Enter') {
         if (focusedId && focusedId !== selectedId) { select(focusedId); e.preventDefault(); }
         else if (selectedId) { openAdd(); e.preventDefault(); }

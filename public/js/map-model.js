@@ -18,6 +18,9 @@
   // room left between an idea and the ideas under it.
   var MAX_IDEA_W = 236;
   var CHILD_GAP = 40;
+  // Links: named lines between any two ideas, outside the tree.
+  var MAX_LINKS = 200;
+  var MAX_LINK_TEXT = 60;
 
   // Main-idea colours, in the order new main branches get them.
   var COLORS = 5;
@@ -176,19 +179,108 @@
   }
 
   // Remove an idea and everything under it; returns them in tree order so
-  // restore() can put them back exactly as they were.
+  // restore() can put them back exactly as they were. Links touching any of
+  // them go too, and ride along on the returned array as `removed.links`.
   function removeSubtree(doc, id) {
     if (id === 'root') return [];
     var removed = subtree(doc, id);
     var ids = {};
     removed.forEach(function (n) { ids[n.id] = true; });
     doc.nodes = nodes(doc).filter(function (n) { return !ids[n.id]; });
-    return removed.map(function (n) { return JSON.parse(JSON.stringify(n)); });
+    var out = removed.map(function (n) { return JSON.parse(JSON.stringify(n)); });
+    out.links = removeLinksFor(doc, Object.keys(ids));
+    return out;
   }
 
+  // Put back what removeSubtree() took: the ideas first, then their links.
   function restore(doc, removed) {
     (removed || []).forEach(function (n) {
       if (!node(doc, n.id)) doc.nodes.push(JSON.parse(JSON.stringify(n)));
+    });
+    if (removed && removed.links) restoreLinks(doc, removed.links);
+  }
+
+  // ── Links ──────────────────────────────────────────────────────────────
+  // A link is { id, from, to, text } in the optional doc.links array. It has
+  // no direction, so two ideas are linked at most once; an empty text is an
+  // unnamed link. Maps without links simply have no links field.
+  function links(doc) { return doc && doc.links ? doc.links : []; }
+
+  function linkById(doc, id) {
+    var list = links(doc);
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+    return null;
+  }
+
+  // The link joining two ideas, in either direction.
+  function linkBetween(doc, a, b) {
+    var list = links(doc);
+    for (var i = 0; i < list.length; i++) {
+      var l = list[i];
+      if ((l.from === a && l.to === b) || (l.from === b && l.to === a)) return l;
+    }
+    return null;
+  }
+
+  function linkText(text) { return trim(text).slice(0, MAX_LINK_TEXT); }
+
+  // Whether a link from `from` to `to` may be added: two different ideas
+  // that exist, not linked yet, with room left.
+  function canLink(doc, from, to) {
+    return from !== to && !!node(doc, from) && !!node(doc, to) &&
+      !linkBetween(doc, from, to) && links(doc).length < MAX_LINKS;
+  }
+
+  // Link two ideas and return the new link, or null for a missing idea, the
+  // same idea twice, a pair already linked or a full list.
+  function addLink(doc, from, to, text) {
+    if (!canLink(doc, from, to)) return null;
+    var id;
+    do { id = 'l' + Math.random().toString(36).slice(2, 10); } while (linkById(doc, id));
+    var l = { id: id, from: from, to: to, text: linkText(text) };
+    if (!doc.links) doc.links = [];
+    doc.links.push(l);
+    return l;
+  }
+
+  // Rename a link; an empty name is allowed and leaves it unnamed.
+  function renameLink(doc, id, text) {
+    var l = linkById(doc, id);
+    if (!l) return false;
+    l.text = linkText(text);
+    return true;
+  }
+
+  // Remove one link; returns a copy for Undo, or null.
+  function removeLink(doc, id) {
+    var list = links(doc);
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === id) return JSON.parse(JSON.stringify(list.splice(i, 1)[0]));
+    }
+    return null;
+  }
+
+  // Remove every link touching any of the ideas in `ids`; returns copies.
+  function removeLinksFor(doc, ids) {
+    if (!doc || !doc.links) return [];
+    var gone = {};
+    (ids || []).forEach(function (id) { gone[id] = true; });
+    var removed = [];
+    doc.links = doc.links.filter(function (l) {
+      var hit = gone[l.from] === true || gone[l.to] === true;
+      if (hit) removed.push(JSON.parse(JSON.stringify(l)));
+      return !hit;
+    });
+    return removed;
+  }
+
+  // Put removed links back, each only while both its ideas exist and the
+  // pair is still free.
+  function restoreLinks(doc, list) {
+    (list || []).forEach(function (l) {
+      if (!l || linkById(doc, l.id) || !canLink(doc, l.from, l.to)) return;
+      if (!doc.links) doc.links = [];
+      doc.links.push(JSON.parse(JSON.stringify(l)));
     });
   }
 
@@ -250,6 +342,34 @@
       var c = doc.nodes[k], hops = 0, p = c;
       while (p && p.parent) { p = byId[p.parent]; if (++hops > doc.nodes.length) return 'cycle'; }
     }
+    return validateLinks(doc, byId);
+  }
+
+  // The optional links array: absent is fine; if present, every link joins
+  // two different existing ideas, once, with a short (possibly empty) name.
+  function validateLinks(doc, byId) {
+    if (doc.links === undefined) return null;
+    if (!Array.isArray(doc.links)) return 'links not a list';
+    if (doc.links.length > MAX_LINKS) return 'too many links';
+    var has = Object.prototype.hasOwnProperty;
+    // No prototype, so an id such as '__proto__' is counted like any other.
+    var ids = Object.create(null), pairs = Object.create(null);
+    for (var i = 0; i < doc.links.length; i++) {
+      var l = doc.links[i];
+      if (!l || typeof l !== 'object' || Array.isArray(l)) return 'bad link';
+      if (typeof l.id !== 'string' || !l.id || l.id.length > 40) return 'bad link id';
+      if (has.call(ids, l.id)) return 'duplicate link id';
+      ids[l.id] = true;
+      if (typeof l.from !== 'string' || typeof l.to !== 'string' ||
+        !has.call(byId, l.from) || !has.call(byId, l.to)) return 'link to a missing idea';
+      if (l.from === l.to) return 'link to itself';
+      var key = l.from < l.to ? l.from + '\n' + l.to : l.to + '\n' + l.from;
+      if (has.call(pairs, key)) return 'duplicate link';
+      pairs[key] = true;
+      // The raw length: the page always stores a trimmed name, so padding
+      // around a short word is no way past the limit.
+      if (typeof l.text !== 'string' || l.text.length > MAX_LINK_TEXT) return 'bad link text';
+    }
     return null;
   }
 
@@ -258,6 +378,8 @@
     MAX_TEXT: MAX_TEXT,
     MAX_ROOT_TEXT: MAX_ROOT_TEXT,
     MAX_DEPTH: MAX_DEPTH,
+    MAX_LINKS: MAX_LINKS,
+    MAX_LINK_TEXT: MAX_LINK_TEXT,
     COLORS: COLORS,
     newId: newId,
     node: node,
@@ -277,6 +399,14 @@
     removeSubtree: removeSubtree,
     restore: restore,
     subtree: subtree,
+    links: links,
+    linkById: linkById,
+    linkBetween: linkBetween,
+    addLink: addLink,
+    renameLink: renameLink,
+    removeLink: removeLink,
+    removeLinksFor: removeLinksFor,
+    restoreLinks: restoreLinks,
     validate: validate,
   };
 });
