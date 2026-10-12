@@ -498,14 +498,73 @@
   .actions .btn-wide {
     flex: 1;
   }
-  /* Rename, Delete map and Link (the central idea only; other ideas have
-     their own menu): on a phone, icons only so Add idea keeps its room.
-     The words stay for screen readers. */
+  /* The idea menu (#9): a small white bar floating just above the selected
+     idea, with Edit, Add child, Join and Delete. It sits over the paper,
+     not in the zoomed world, so it keeps its size; canvas.js moves it with
+     a transform. */
+  .idea-menu {
+    position: absolute;
+    left: 0;
+    top: 0;
+    z-index: 15;
+    display: flex;
+    gap: 2px;
+    padding: 4px;
+    background: rgb(var(--surface));
+    border: 1px solid rgb(var(--line));
+    border-radius: 16px;
+    box-shadow: 0 6px 18px rgb(var(--fg) / 0.12);
+  }
+  .idea-menu[hidden] {
+    display: none;
+  }
+  /* Eases with the world after Fit or Add idea, so it stays on its idea
+     (canvas.js never adds it under reduced motion). */
+  .idea-menu.glide {
+    transition: transform 220ms ease-out;
+  }
+  .menu-btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-width: 44px;
+    height: 44px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 12px;
+    background: transparent;
+    color: rgb(var(--fg));
+    font: inherit;
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .menu-btn:hover {
+    background: rgb(var(--raised));
+  }
+  .menu-btn:focus-visible {
+    outline: 2px solid rgb(var(--focus));
+    outline-offset: -2px;
+  }
+  .menu-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+    background: transparent;
+  }
+  .menu-btn.is-danger {
+    color: rgb(var(--danger));
+  }
+  /* On a phone the menu is icons only, so it fits beside any idea. The
+     words stay for screen readers and as each button's tooltip. */
   @media (max-width: 479px) {
-    .btn-tool {
+    .menu-btn {
       padding: 0;
     }
-    .btn-tool .btn-label {
+    .menu-btn .btn-label {
       position: absolute;
       width: 1px;
       height: 1px;

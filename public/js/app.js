@@ -201,7 +201,12 @@
         }).catch(function () { startError(); });
         return;
       }
-      if (r.maps.length) openMapById(r.maps[0].id);
+      // The staging demo opens on its Lisbon map while it exists, whatever
+      // else this account touched since: maps[0] is the latest edited, and a
+      // welcome map made on a plain visit would otherwise come first.
+      var lisbon = r.demo && r.maps.filter(function (m) { return /^demo-.+-lisbon$/.test(m.id); })[0];
+      if (lisbon) openMapById(lisbon.id);
+      else if (r.maps.length) openMapById(r.maps[0].id);
       else location.hash = '#/maps';
     }).catch(function () { startError(); });
   }
