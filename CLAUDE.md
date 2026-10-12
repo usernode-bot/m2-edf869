@@ -136,7 +136,7 @@ a dark value (named in `tailwind.config.js`), and components
 (`btn-primary`, `btn-secondary`, `field`, `list` and `list-row`,
 `card`, `section-label`, `skeleton`, `state-empty`, `state-error`, plus
 the canvas pieces: `.canvas`, `.world`, `.idea*`, `.c-*`/`.b-*`, `.topbar`,
-`.bottom-bar`, `.thumb`, `.icon`).
+`.bottom-bar`, `.idea-menu` and `.menu-btn`, `.thumb`, `.icon`).
 Re-theme by changing the token values there, keeping every text pair at
 4.5:1 or more in both looks.
 

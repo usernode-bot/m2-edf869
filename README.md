@@ -5,8 +5,10 @@ Build modern, easy-to-use mind maps.
 A map is a canvas of dotted paper. It grows out from one central idea:
 each main idea gets its own colour, its branches curve outward and get
 thinner as they go, and outer ideas are text underlined in the branch's
-colour. Ideas are added, renamed, dragged and deleted; everything saves
-on its own as you work.
+colour. Tapping an idea opens a small menu beside it: Edit, Add child,
+Join (a named line to another idea) and Delete, which asks first and
+still offers Undo. Ideas can be dragged anywhere; everything saves on its
+own as you work.
 
 Maps are private by default. A map's Share button lets its owner choose
 who can open it (Private, Anyone with the link, or Public, which means

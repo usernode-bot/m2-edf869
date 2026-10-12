@@ -156,28 +156,14 @@
     topbar.appendChild(topRight);
     rootEl.appendChild(topbar);
 
-    // Bottom bar: the selection line, then Rename, Delete, Link and Add idea,
-    // or only Cancel while a link waits for its second idea. The three tool
-    // buttons drop their words on a phone (.btn-tool), keeping them for
-    // screen readers. A read-only view has none of it.
-    var bar = null, selLine, renameBtn, deleteTool, deleteBtn, linkBtn, addBtn, cancelBtn;
+    // Bottom bar: the selection line, then Add idea, or only Cancel while a
+    // link waits for its second idea. A read-only view has none of it.
+    var bar = null, selLine, addBtn, cancelBtn;
     if (!readOnly) {
       bar = el('div', 'bottom-bar');
       selLine = el('div', 'selection');
       bar.appendChild(selLine);
       var actions = el('div', 'actions');
-      var toolButton = function (name, text) {
-        var b = el('button', 'btn-secondary btn-tool');
-        b.type = 'button';
-        b.appendChild(icon(name));
-        var label = el('span', 'btn-label', text);
-        b.appendChild(label);
-        return { btn: b, label: label };
-      };
-      renameBtn = toolButton('pencil', 'Rename').btn;
-      deleteTool = toolButton('bin', 'Delete');
-      deleteBtn = deleteTool.btn;
-      linkBtn = toolButton('link', 'Link').btn;
       addBtn = el('button', 'btn-primary');
       addBtn.type = 'button';
       addBtn.appendChild(icon('plus'));
@@ -185,13 +171,41 @@
       cancelBtn = el('button', 'btn-secondary btn-wide', 'Cancel');
       cancelBtn.type = 'button';
       cancelBtn.hidden = true;
-      actions.appendChild(renameBtn);
-      actions.appendChild(deleteBtn);
-      actions.appendChild(linkBtn);
       actions.appendChild(addBtn);
       actions.appendChild(cancelBtn);
       bar.appendChild(actions);
       rootEl.appendChild(bar);
+    }
+
+    // The idea menu: Edit, Add child, Join and Delete, floating beside the
+    // selected idea (#9). It lives over the paper, not in the world, so it
+    // keeps its size at any zoom; placeMenu() follows the idea as the map
+    // pans, zooms or the idea is dragged. Each button keeps its words for
+    // screen readers and as a tooltip when a phone shows the icon alone.
+    var menu = null, editItem, addItem, joinItem, deleteItem;
+    if (!readOnly) {
+      menu = el('div', 'idea-menu');
+      menu.setAttribute('role', 'toolbar');
+      menu.setAttribute('aria-label', 'Idea actions');
+      menu.hidden = true;
+      var menuItem = function (name, text, cls) {
+        var b = el('button', 'menu-btn' + (cls ? ' ' + cls : ''));
+        b.type = 'button';
+        b.appendChild(icon(name));
+        var label = el('span', 'btn-label', text);
+        b.appendChild(label);
+        b.title = text;
+        menu.appendChild(b);
+        return { btn: b, label: label };
+      };
+      editItem = menuItem('pencil', 'Edit');
+      addItem = menuItem('plus', 'Add child');
+      joinItem = menuItem('link', 'Join');
+      deleteItem = menuItem('bin', 'Delete', 'is-danger');
+      joinItem.btn.title = 'Join with another idea';
+      // Right after the world in the DOM, so Tab reaches it after the ideas
+      // and before the bars.
+      rootEl.insertBefore(menu, world.nextSibling);
     }
 
     // The bottom bar's height, for keeping the map clear of it.
@@ -337,6 +351,7 @@
         }
       });
       svg.innerHTML = paths; // coordinates and class names only, never user text
+      placeMenu(); // the selected idea may have moved or changed size
     }
 
     // The straight line between two linked ideas, from where it leaves one
@@ -369,10 +384,38 @@
     function applyTransform() {
       world.style.transform = 'translate(' + tx + 'px, ' + ty + 'px) scale(' + scale + ')';
       rootEl.style.backgroundPosition = tx + 'px ' + ty + 'px';
+      placeMenu();
+    }
+
+    // Put the idea menu just above the selected idea, centred on it and kept
+    // on screen; below it when the top bar is in the way. Read from the
+    // model and the view's own numbers, so a gliding Fit lands it where the
+    // idea will be.
+    function placeMenu() {
+      if (!menu || menu.hidden) return;
+      var n = selNode();
+      var box = n && boxOf(n);
+      if (!box) return;
+      var W = rootEl.clientWidth, H = rootEl.clientHeight;
+      var mw = menu.offsetWidth, mh = menu.offsetHeight;
+      var left = box.x * scale + tx, top = box.y * scale + ty;
+      var w = box.w * scale, h = box.h * scale;
+      // An idea panned out of view takes its menu with it: it would point
+      // at nothing. Not the hidden attribute, which renderMenu owns.
+      var away = left + w < 0 || left > W || top + h < 60 || top > H - barHeight();
+      menu.style.visibility = away ? 'hidden' : '';
+      if (away) return;
+      var x = Math.min(Math.max(left + w / 2 - mw / 2, 8), Math.max(W - mw - 8, 8));
+      var y = top - mh - 10;
+      var below = top + h + 10;
+      if (y < 68 && below + mh <= H - barHeight() - 8) y = below;
+      menu.style.transform = 'translate(' + Math.round(x) + 'px, ' + Math.round(y) + 'px)';
     }
 
     function glide(on) {
       world.classList.toggle('glide', !!on && !reducedMotion);
+      // The menu moves with the same easing, so it stays on its idea.
+      if (menu) menu.classList.toggle('glide', !!on && !reducedMotion);
     }
 
     function screenToWorld(px, py) {
@@ -450,9 +493,10 @@
     var lastTap = { id: null, at: 0 };
 
     rootEl.addEventListener('pointerdown', function (e) {
-      // The bars float over the paper; a press on them is not a tap on it
-      // (one used to clear the selection before Rename or Link could act).
-      if (e.target.closest && e.target.closest('.topbar, .bottom-bar')) return;
+      // The bars and the idea menu float over the paper; a press on them is
+      // not a tap on it (one used to clear the selection before an action
+      // could act).
+      if (e.target.closest && e.target.closest('.topbar, .bottom-bar, .idea-menu')) return;
       if (pointers.size === 2) return;
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (pointers.size === 2) {
@@ -619,14 +663,24 @@
       } else {
         selLine.appendChild(el('span', 'sel-meta', 'Tap an idea to select it'));
       }
-      var isRoot = n && n.id === 'root';
-      renameBtn.hidden = !n || linking;
-      deleteBtn.hidden = !n || linking;
-      deleteTool.label.textContent = isRoot ? 'Delete map' : 'Delete';
-      linkBtn.hidden = !n || linking;
-      linkBtn.disabled = M.links(d).length >= M.MAX_LINKS;
       addBtn.hidden = linking;
       cancelBtn.hidden = !linking;
+      renderMenu(n, linking, full || deepest);
+    }
+
+    // The menu shows for a selected idea, and steps aside while a link waits
+    // for its second idea (the bottom bar says what to do then).
+    function renderMenu(n, linking, cannotAdd) {
+      if (!menu) return;
+      menu.hidden = !n || linking;
+      if (menu.hidden) return;
+      var isRoot = n.id === 'root';
+      var deleteText = isRoot ? 'Delete map' : 'Delete';
+      deleteItem.label.textContent = deleteText;
+      deleteItem.btn.title = deleteText;
+      addItem.btn.disabled = cannotAdd;
+      joinItem.btn.disabled = M.links(d).length >= M.MAX_LINKS;
+      placeMenu();
     }
 
     // The selection line's dot, in the branch's colour (ink for the centre).
@@ -730,7 +784,23 @@
         });
         return;
       }
-      var removed = M.removeSubtree(d, n.id);
+      // Deleting an idea asks first (#9), then still offers Undo.
+      var under = M.countUnder(d, n.id);
+      un.alert({
+        title: 'Delete ' + n.text.trim() + '?',
+        message: under > 0
+          ? 'This also deletes the ' + (under === 1 ? 'idea' : under + ' ideas') + ' under it.'
+          : 'It comes off this map.',
+        buttons: [
+          { label: 'Cancel', style: 'cancel' },
+          { label: 'Delete', style: 'destructive', handler: function () { deleteIdea(n.id); } },
+        ],
+      });
+    }
+
+    function deleteIdea(id) {
+      if (!M.node(d, id)) return;
+      var removed = M.removeSubtree(d, id);
       var under = removed.length - 1;
       var text = removed[0].text;
       select(null);
@@ -767,7 +837,7 @@
       var refocus = document.activeElement === cancelBtn;
       linkingFrom = null;
       renderBar();
-      if (refocus) linkBtn.focus();
+      if (refocus && joinItem) joinItem.btn.focus();
     }
 
     function finishLink(id) {
@@ -820,11 +890,14 @@
     }
 
     if (bar) {
-      renameBtn.addEventListener('click', function () { openRename(); });
-      deleteBtn.addEventListener('click', openDelete);
-      linkBtn.addEventListener('click', startLink);
       cancelBtn.addEventListener('click', cancelLink);
       addBtn.addEventListener('click', openAdd);
+    }
+    if (menu) {
+      editItem.btn.addEventListener('click', function () { openRename(); });
+      addItem.btn.addEventListener('click', openAdd);
+      joinItem.btn.addEventListener('click', startLink);
+      deleteItem.btn.addEventListener('click', openDelete);
     }
 
     // ── Keyboard ─────────────────────────────────────────────────────────
@@ -832,6 +905,23 @@
     rootEl.addEventListener('keydown', function (e) {
       if (readOnly) return;
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      // A key on a bar's or the menu's own button is that button's: Enter
+      // presses it, rather than adding an idea. Escape in the menu closes it
+      // and hands focus back to the idea.
+      if (e.target.closest && e.target.closest('.topbar, .bottom-bar, .idea-menu')) {
+        if (e.key === 'Escape' && e.target.closest('.idea-menu') && selectedId) {
+          var back = els.get(selectedId);
+          select(null);
+          if (back) back.focus();
+          e.preventDefault();
+        } else if (e.key === 'Escape' && linkingFrom) {
+          cancelLink();
+          e.preventDefault();
+        } else if (e.key === 'Escape') {
+          select(null);
+        }
+        return;
+      }
       var focused = e.target.closest ? e.target.closest('.idea') : null;
       var focusedId = focused ? focused.dataset.id : null;
       var focusedLink = e.target.closest ? e.target.closest('.link-label') : null;
@@ -882,11 +972,16 @@
     // Measure once the layout has settled, then fit the whole map.
     requestAnimationFrame(function () { fit(false); });
 
+    // A resized window moves the idea under the menu on screen.
+    var onResize = function () { placeMenu(); };
+    root.addEventListener('resize', onResize);
+
     return {
       el: rootEl,
       setStatus: setStatus,
       fit: function () { fit(true); },
       destroy: function () {
+        root.removeEventListener('resize', onResize);
         container.textContent = '';
       },
     };
