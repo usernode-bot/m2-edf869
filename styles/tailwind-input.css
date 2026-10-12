@@ -40,6 +40,10 @@
     --branch-violet: 124 58 237; /* third */
     --branch-rose: 225 29 72;    /* fourth */
     --branch-sky: 2 132 199;     /* fifth */
+    /* The native kit's popover surface (the idea menu): the app's own
+       surface. Declared here on html, the element that also carries .dark,
+       so it takes the dark surface in the dark look on its own. */
+    --un-popover-bg: rgb(var(--surface));
   }
   .dark {
     --ground: 16 19 26;
@@ -494,8 +498,9 @@
   .actions .btn-wide {
     flex: 1;
   }
-  /* Rename, Delete and Link: on a phone, icons only so Add idea keeps its
-     room. The words stay for screen readers. */
+  /* Rename, Delete map and Link (the central idea only; other ideas have
+     their own menu): on a phone, icons only so Add idea keeps its room.
+     The words stay for screen readers. */
   @media (max-width: 479px) {
     .btn-tool {
       padding: 0;

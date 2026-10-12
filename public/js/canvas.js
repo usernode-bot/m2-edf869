@@ -63,6 +63,11 @@
       }
       return Promise.resolve({ button: null });
     },
+    popover: function () {
+      var p = Promise.resolve(null);
+      p.dismiss = function () {};
+      return p;
+    },
   };
 
   // The loading placeholder and the error state, drawn on the dotted canvas.
@@ -156,11 +161,12 @@
     topbar.appendChild(topRight);
     rootEl.appendChild(topbar);
 
-    // Bottom bar: the selection line, then Rename, Delete, Link and Add idea,
-    // or only Cancel while a link waits for its second idea. The three tool
-    // buttons drop their words on a phone (.btn-tool), keeping them for
-    // screen readers. A read-only view has none of it.
-    var bar = null, selLine, renameBtn, deleteTool, deleteBtn, linkBtn, addBtn, cancelBtn;
+    // Bottom bar: the selection line, Add idea, and — only while the central
+    // idea is selected — Rename, Delete map and Link (any other idea gets
+    // them in its own menu), or only Cancel while a link waits for its second
+    // idea. The tool buttons drop their words on a phone (.btn-tool), keeping
+    // them for screen readers. A read-only view has none of it.
+    var bar = null, selLine, renameBtn, deleteBtn, linkBtn, addBtn, cancelBtn;
     if (!readOnly) {
       bar = el('div', 'bottom-bar');
       selLine = el('div', 'selection');
@@ -175,8 +181,7 @@
         return { btn: b, label: label };
       };
       renameBtn = toolButton('pencil', 'Rename').btn;
-      deleteTool = toolButton('bin', 'Delete');
-      deleteBtn = deleteTool.btn;
+      deleteBtn = toolButton('bin', 'Delete map').btn;
       linkBtn = toolButton('link', 'Link').btn;
       addBtn = el('button', 'btn-primary');
       addBtn.type = 'button';
@@ -212,6 +217,36 @@
 
     function selNode() { return selectedId ? M.node(d, selectedId) : null; }
 
+    // The idea menu: a small popover beside the selected idea (anything but
+    // the central one) with the four things you can do to it. Its handlers
+    // act on selNode(), which is this idea because select(id) ran first.
+    var menu = null; // { id, handle } while a menu is open
+    var menuClosed = { id: null, at: 0 }; // a menu this same press may have closed
+
+    function openMenu(id) {
+      if (readOnly || id === 'root' || linkingFrom) return;
+      if (!M.node(d, id) || !els.get(id)) return;
+      closeMenu();
+      var p = un.popover({
+        anchorEl: els.get(id),
+        items: [
+          { label: 'Rename', handler: function () { openRename(id); } },
+          { label: 'Add idea', disabled: M.ideaCount(d) >= M.MAX_NODES || !M.canAddUnder(d, id), handler: openAdd },
+          { label: 'Link', disabled: M.links(d).length >= M.MAX_LINKS, handler: startLink },
+          { label: 'Delete', destructive: true, handler: openDelete },
+        ],
+      });
+      menu = { id: id, handle: p };
+      p.then(function () {
+        if (menu && menu.handle === p) menu = null;
+        menuClosed = { id: id, at: performance.now() };
+      });
+    }
+
+    function closeMenu() {
+      if (menu) { menu.handle.dismiss(); menu = null; }
+    }
+
     function commit() {
       // The caller saves; the canvas only redraws and reports.
       drawBranches();
@@ -227,6 +262,7 @@
     }
 
     function render() {
+      closeMenu(); // the buttons are rebuilt, so the menu's anchor would dangle
       els.forEach(function (old) { if (old.parentNode) old.parentNode.removeChild(old); });
       els.clear();
       M.nodes(d).forEach(function (n) {
@@ -249,6 +285,7 @@
           b.classList.add('is-selected');
           b.setAttribute('aria-pressed', 'true');
         }
+        if (n.id !== 'root') b.setAttribute('aria-haspopup', 'menu');
         b.setAttribute('aria-label', ideaLabel(n));
         b.style.left = n.x + 'px';
         b.style.top = n.y + 'px';
@@ -461,6 +498,7 @@
         var dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
         var cx = (pts[0].x + pts[1].x) / 2, cy = (pts[0].y + pts[1].y) / 2;
         gesture = { kind: 'pinch', baseScale: scale, baseDist: dist, baseCx: cx, baseCy: cy };
+        closeMenu();
         return;
       }
       // Read only, an idea is just more paper: dragging it pans the map.
@@ -469,7 +507,9 @@
       if (labelEl) {
         gesture = { kind: 'link-tap', id: labelEl.dataset.link, x: e.clientX, y: e.clientY, moved: false };
       } else if (ideaEl) {
-        gesture = { kind: 'maybe-drag', id: ideaEl.dataset.id, x: e.clientX, y: e.clientY, moved: false };
+        // t: when this press began, so a tap can tell whether this same press
+        // already closed the idea's own menu (outside or anchor press).
+        gesture = { kind: 'maybe-drag', id: ideaEl.dataset.id, x: e.clientX, y: e.clientY, moved: false, t: e.timeStamp };
       } else {
         gesture = { kind: 'pan', x: e.clientX, y: e.clientY, moved: false };
       }
@@ -500,6 +540,7 @@
       }
       if (gesture.kind === 'pan') {
         if (!gesture.moved && Math.hypot(dx, dy) < 6) return;
+        if (!gesture.moved) closeMenu(); // panning the map closes the menu
         gesture.moved = true;
         tx += e.clientX - (gesture.lastX == null ? gesture.x : gesture.lastX);
         ty += e.clientY - (gesture.lastY == null ? gesture.y : gesture.lastY);
@@ -510,6 +551,7 @@
         if (!gesture.moved) {
           gesture.moved = true;
           gesture.kind = 'drag';
+          closeMenu(); // dragging the idea closes its menu
         }
         var wdx = (e.clientX - (gesture.lastX == null ? gesture.x : gesture.lastX)) / scale;
         var wdy = (e.clientY - (gesture.lastY == null ? gesture.y : gesture.lastY)) / scale;
@@ -539,11 +581,17 @@
           finishLink(id); // the second idea of a link, not a selection
           lastTap = { id: null, at: 0 };
         } else if (lastTap.id === id && now - lastTap.at < 300) {
+          closeMenu(); // the first tap opened it
           openRename(id);
           lastTap = { id: null, at: 0 };
         } else {
           lastTap = { id: id, at: now };
+          // The kit closes a popover on an outside press or a press on its
+          // anchor, so a tap on the idea of an open menu closes the menu
+          // instead of reopening it.
+          var wasOpen = (menu && menu.id === id) || (menuClosed.id === id && menuClosed.at >= gesture.t);
           select(id);
+          if (!wasOpen) openMenu(id);
         }
       } else if (gesture.kind === 'link-tap') {
         if (!linkingFrom) openLink(gesture.id);
@@ -558,6 +606,7 @@
     rootEl.addEventListener('pointercancel', endPointer);
     rootEl.addEventListener('wheel', function (e) {
       e.preventDefault();
+      closeMenu();
       if (e.ctrlKey || e.metaKey) {
         var rect = rootEl.getBoundingClientRect();
         var px = e.clientX - rect.left, py = e.clientY - rect.top;
@@ -574,6 +623,7 @@
 
     // ── Selection and the bottom bar ─────────────────────────────────────
     function select(id) {
+      closeMenu(); // selecting another idea, or nothing, never leaves a stale one
       if (selectedId && els.get(selectedId)) {
         els.get(selectedId).classList.remove('is-selected');
         els.get(selectedId).removeAttribute('aria-pressed');
@@ -619,11 +669,12 @@
       } else {
         selLine.appendChild(el('span', 'sel-meta', 'Tap an idea to select it'));
       }
-      var isRoot = n && n.id === 'root';
-      renameBtn.hidden = !n || linking;
-      deleteBtn.hidden = !n || linking;
-      deleteTool.label.textContent = isRoot ? 'Delete map' : 'Delete';
-      linkBtn.hidden = !n || linking;
+      // Rename, Delete map and Link belong to the menu for any other idea;
+      // the bar keeps them only for the central one, which has no menu.
+      var tools = !!n && n.id === 'root' && !linking;
+      renameBtn.hidden = !tools;
+      deleteBtn.hidden = !tools;
+      linkBtn.hidden = !tools;
       linkBtn.disabled = M.links(d).length >= M.MAX_LINKS;
       addBtn.hidden = linking;
       cancelBtn.hidden = !linking;
@@ -715,22 +766,9 @@
       });
     }
 
-    function openDelete() {
-      var n = selNode();
-      if (!n) return;
-      if (n.id === 'root') {
-        var count = M.ideaCount(d) - 1;
-        un.alert({
-          title: 'Delete ' + d.nodes[0].text.trim() + '?',
-          message: 'This deletes the map and its ' + count + ' ideas.',
-          buttons: [
-            { label: 'Cancel', style: 'cancel' },
-            { label: 'Delete', style: 'destructive', handler: function () { opts.onDeleteMap(); } },
-          ],
-        });
-        return;
-      }
-      var removed = M.removeSubtree(d, n.id);
+    function deleteIdea(id) {
+      if (!M.node(d, id)) return; // gone while the confirmation was open
+      var removed = M.removeSubtree(d, id);
       var under = removed.length - 1;
       var text = removed[0].text;
       select(null);
@@ -750,6 +788,34 @@
       });
     }
 
+    function openDelete() {
+      var n = selNode();
+      if (!n) return;
+      if (n.id === 'root') {
+        var count = M.ideaCount(d) - 1;
+        un.alert({
+          title: 'Delete ' + d.nodes[0].text.trim() + '?',
+          message: 'This deletes the map and its ' + count + ' ideas.',
+          buttons: [
+            { label: 'Cancel', style: 'cancel' },
+            { label: 'Delete', style: 'destructive', handler: function () { opts.onDeleteMap(); } },
+          ],
+        });
+        return;
+      }
+      // Anything but the central idea asks first, naming it and what goes
+      // with it.
+      var under = M.countUnder(d, n.id);
+      un.alert({
+        title: 'Delete ' + n.text + '?',
+        message: under === 0 ? undefined : 'This also deletes the ' + (under === 1 ? '1 idea' : under + ' ideas') + ' under it.',
+        buttons: [
+          { label: 'Cancel', style: 'cancel' },
+          { label: 'Delete', style: 'destructive', handler: function () { deleteIdea(n.id); } },
+        ],
+      });
+    }
+
     // ── Links ────────────────────────────────────────────────────────────
     // Link waits for a second idea; tapping it (or Enter on it) asks for an
     // optional name. Cancel, the paper or Escape stop without linking, and the
@@ -765,9 +831,15 @@
     function cancelLink() {
       if (!linkingFrom) return;
       var refocus = document.activeElement === cancelBtn;
+      var from = linkingFrom;
       linkingFrom = null;
       renderBar();
-      if (refocus) linkBtn.focus();
+      // The bar keeps Link for the central idea; any other starter's button
+      // is back on the canvas.
+      if (refocus) {
+        if (from === 'root') linkBtn.focus();
+        else { var b = els.get(from); if (b) b.focus(); }
+      }
     }
 
     function finishLink(id) {
@@ -848,15 +920,20 @@
         return;
       }
       if (e.key === 'Enter') {
-        if (focusedId && focusedId !== selectedId) { select(focusedId); e.preventDefault(); }
-        else if (selectedId) { openAdd(); e.preventDefault(); }
+        if (focusedId && focusedId !== selectedId) {
+          select(focusedId);
+          if (focusedId !== 'root') openMenu(focusedId);
+          e.preventDefault();
+        } else if (selectedId) { openAdd(); e.preventDefault(); }
       } else if (e.key === 'F2') {
+        closeMenu(); // the menu would cover the sheet's field
         openRename(focusedId || selectedId);
         e.preventDefault();
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedId) { openDelete(); e.preventDefault(); }
       } else if (e.key === 'Escape') {
-        select(null);
+        // With a menu open, Escape only closes the menu (the kit's dismissal).
+        if (!menu) select(null);
       } else if (selectedId && e.key.indexOf('Arrow') === 0) {
         var step = e.shiftKey ? 50 : 10;
         var dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
@@ -887,6 +964,7 @@
       setStatus: setStatus,
       fit: function () { fit(true); },
       destroy: function () {
+        closeMenu();
         container.textContent = '';
       },
     };
