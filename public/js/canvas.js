@@ -63,6 +63,11 @@
       }
       return Promise.resolve({ button: null });
     },
+    popover: function () {
+      var p = Promise.resolve(null);
+      p.dismiss = function () {};
+      return p;
+    },
   };
 
   // The loading placeholder and the error state, drawn on the dotted canvas.
@@ -226,6 +231,36 @@
 
     function selNode() { return selectedId ? M.node(d, selectedId) : null; }
 
+    // The idea menu: a small popover beside the selected idea (anything but
+    // the central one) with the four things you can do to it. Its handlers
+    // act on selNode(), which is this idea because select(id) ran first.
+    var menu = null; // { id, handle } while a menu is open
+    var menuClosed = { id: null, at: 0 }; // a menu this same press may have closed
+
+    function openMenu(id) {
+      if (readOnly || id === 'root' || linkingFrom) return;
+      if (!M.node(d, id) || !els.get(id)) return;
+      closeMenu();
+      var p = un.popover({
+        anchorEl: els.get(id),
+        items: [
+          { label: 'Rename', handler: function () { openRename(id); } },
+          { label: 'Add idea', disabled: M.ideaCount(d) >= M.MAX_NODES || !M.canAddUnder(d, id), handler: openAdd },
+          { label: 'Link', disabled: M.links(d).length >= M.MAX_LINKS, handler: startLink },
+          { label: 'Delete', destructive: true, handler: openDelete },
+        ],
+      });
+      menu = { id: id, handle: p };
+      p.then(function () {
+        if (menu && menu.handle === p) menu = null;
+        menuClosed = { id: id, at: performance.now() };
+      });
+    }
+
+    function closeMenu() {
+      if (menu) { menu.handle.dismiss(); menu = null; }
+    }
+
     function commit() {
       // The caller saves; the canvas only redraws and reports.
       drawBranches();
@@ -241,6 +276,7 @@
     }
 
     function render() {
+      closeMenu(); // the buttons are rebuilt, so the menu's anchor would dangle
       els.forEach(function (old) { if (old.parentNode) old.parentNode.removeChild(old); });
       els.clear();
       M.nodes(d).forEach(function (n) {
@@ -263,6 +299,7 @@
           b.classList.add('is-selected');
           b.setAttribute('aria-pressed', 'true');
         }
+        if (n.id !== 'root') b.setAttribute('aria-haspopup', 'menu');
         b.setAttribute('aria-label', ideaLabel(n));
         b.style.left = n.x + 'px';
         b.style.top = n.y + 'px';
@@ -505,6 +542,7 @@
         var dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
         var cx = (pts[0].x + pts[1].x) / 2, cy = (pts[0].y + pts[1].y) / 2;
         gesture = { kind: 'pinch', baseScale: scale, baseDist: dist, baseCx: cx, baseCy: cy };
+        closeMenu();
         return;
       }
       // Read only, an idea is just more paper: dragging it pans the map.
@@ -513,7 +551,9 @@
       if (labelEl) {
         gesture = { kind: 'link-tap', id: labelEl.dataset.link, x: e.clientX, y: e.clientY, moved: false };
       } else if (ideaEl) {
-        gesture = { kind: 'maybe-drag', id: ideaEl.dataset.id, x: e.clientX, y: e.clientY, moved: false };
+        // t: when this press began, so a tap can tell whether this same press
+        // already closed the idea's own menu (outside or anchor press).
+        gesture = { kind: 'maybe-drag', id: ideaEl.dataset.id, x: e.clientX, y: e.clientY, moved: false, t: e.timeStamp };
       } else {
         gesture = { kind: 'pan', x: e.clientX, y: e.clientY, moved: false };
       }
@@ -544,6 +584,7 @@
       }
       if (gesture.kind === 'pan') {
         if (!gesture.moved && Math.hypot(dx, dy) < 6) return;
+        if (!gesture.moved) closeMenu(); // panning the map closes the menu
         gesture.moved = true;
         tx += e.clientX - (gesture.lastX == null ? gesture.x : gesture.lastX);
         ty += e.clientY - (gesture.lastY == null ? gesture.y : gesture.lastY);
@@ -554,6 +595,7 @@
         if (!gesture.moved) {
           gesture.moved = true;
           gesture.kind = 'drag';
+          closeMenu(); // dragging the idea closes its menu
         }
         var wdx = (e.clientX - (gesture.lastX == null ? gesture.x : gesture.lastX)) / scale;
         var wdy = (e.clientY - (gesture.lastY == null ? gesture.y : gesture.lastY)) / scale;
@@ -583,11 +625,17 @@
           finishLink(id); // the second idea of a link, not a selection
           lastTap = { id: null, at: 0 };
         } else if (lastTap.id === id && now - lastTap.at < 300) {
+          closeMenu(); // the first tap opened it
           openRename(id);
           lastTap = { id: null, at: 0 };
         } else {
           lastTap = { id: id, at: now };
+          // The kit closes a popover on an outside press or a press on its
+          // anchor, so a tap on the idea of an open menu closes the menu
+          // instead of reopening it.
+          var wasOpen = (menu && menu.id === id) || (menuClosed.id === id && menuClosed.at >= gesture.t);
           select(id);
+          if (!wasOpen) openMenu(id);
         }
       } else if (gesture.kind === 'link-tap') {
         if (!linkingFrom) openLink(gesture.id);
@@ -602,6 +650,7 @@
     rootEl.addEventListener('pointercancel', endPointer);
     rootEl.addEventListener('wheel', function (e) {
       e.preventDefault();
+      closeMenu();
       if (e.ctrlKey || e.metaKey) {
         var rect = rootEl.getBoundingClientRect();
         var px = e.clientX - rect.left, py = e.clientY - rect.top;
@@ -618,6 +667,7 @@
 
     // ── Selection and the bottom bar ─────────────────────────────────────
     function select(id) {
+      closeMenu(); // selecting another idea, or nothing, never leaves a stale one
       if (selectedId && els.get(selectedId)) {
         els.get(selectedId).classList.remove('is-selected');
         els.get(selectedId).removeAttribute('aria-pressed');
@@ -835,6 +885,7 @@
     function cancelLink() {
       if (!linkingFrom) return;
       var refocus = document.activeElement === cancelBtn;
+      var from = linkingFrom;
       linkingFrom = null;
       renderBar();
       if (refocus && joinItem) joinItem.btn.focus();
@@ -938,15 +989,20 @@
         return;
       }
       if (e.key === 'Enter') {
-        if (focusedId && focusedId !== selectedId) { select(focusedId); e.preventDefault(); }
-        else if (selectedId) { openAdd(); e.preventDefault(); }
+        if (focusedId && focusedId !== selectedId) {
+          select(focusedId);
+          if (focusedId !== 'root') openMenu(focusedId);
+          e.preventDefault();
+        } else if (selectedId) { openAdd(); e.preventDefault(); }
       } else if (e.key === 'F2') {
+        closeMenu(); // the menu would cover the sheet's field
         openRename(focusedId || selectedId);
         e.preventDefault();
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedId) { openDelete(); e.preventDefault(); }
       } else if (e.key === 'Escape') {
-        select(null);
+        // With a menu open, Escape only closes the menu (the kit's dismissal).
+        if (!menu) select(null);
       } else if (selectedId && e.key.indexOf('Arrow') === 0) {
         var step = e.shiftKey ? 50 : 10;
         var dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
