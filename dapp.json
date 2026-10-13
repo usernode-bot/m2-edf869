@@ -93,6 +93,16 @@
       "name": "map.find-button",
       "path": "/?demo=1",
       "expectSelector": ".topbar .find-btn"
+    },
+    {
+      "name": "map.demo-recently-deleted",
+      "path": "/?demo=1#/maps",
+      "expectText": "Recently deleted"
+    },
+    {
+      "name": "map.demo-trash-list",
+      "path": "/?demo=1#/trash",
+      "expectText": "Deletes in"
     }
   ]
 }

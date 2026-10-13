@@ -1,6 +1,7 @@
 /* App shell: the hash router, the start flow and autosave.
  *
- * Routes: #/maps (Your maps), #/map/<id> (one map). With no hash, a shared
+ * Routes: #/maps (Your maps), #/map/<id> (one map), #/trash (Recently
+ * deleted). With no hash, a shared
  * link decides first: ?share=<token> opens a map by its secret link and
  * ?map=<id> opens one by id. Otherwise the start flow decides what to open:
  * guests get the example in memory, a first visit is welcomed with the
@@ -195,8 +196,8 @@
   var current = null; // { map, withoutMaps, saver } for the open owner map
   var conflictOpen = false; // the conflict sheet is on screen
 
-  function toast(message) {
-    if (root.unNative) root.unNative.toast(message);
+  function toast(message, opts) {
+    if (root.unNative) root.unNative.toast(message, opts);
     else console.log('toast:', message);
   }
 
@@ -229,8 +230,22 @@
       onOpenMaps: withoutMaps ? null : function () { location.hash = '#/maps'; },
       onShare: owner ? function () { root.M2ShareSheet(map.id, map.doc.nodes[0].text.trim()); } : null,
       onDeleteMap: function () {
+        // Anything still unsaved goes first, so the trashed copy has it.
+        if (saver) saver.flushNow();
         api('DELETE', '/api/maps/' + map.id).then(function () {
           location.hash = '#/maps';
+          toast('Moved to Recently deleted', {
+            action: {
+              label: 'Undo',
+              handler: function () {
+                api('POST', '/api/maps/' + map.id + '/restore').then(function () {
+                  if (location.hash === '#/maps') route();
+                }).catch(function () {
+                  toast('Couldn’t restore ' + map.doc.nodes[0].text.trim());
+                });
+              },
+            },
+          });
         }).catch(function () {
           if (v) v.setStatus('error');
         });
@@ -371,6 +386,15 @@
     view = root.M2MapsList(el, {
       demo: isDemo,
       onOpen: function (id) { location.hash = '#/map/' + id; },
+      onOpenTrash: function () { location.hash = '#/trash'; },
+    });
+  }
+
+  // ── Recently deleted ─────────────────────────────────────────────────
+  function showTrash() {
+    var el = render(document.createElement('div'));
+    view = root.M2TrashList(el, {
+      onBack: function () { location.hash = '#/maps'; },
     });
   }
 
@@ -432,6 +456,7 @@
     current = null;
     var hash = location.hash;
     if (hash === '#/maps') { showMaps(); }
+    else if (hash === '#/trash') { showTrash(); }
     else if (hash.indexOf('#/map/') === 0) { openMapById(decodeURIComponent(hash.slice(6))); }
     else if (shareParam) { openShared(shareParam); }
     else if (mapParam) { openMapById(mapParam); }

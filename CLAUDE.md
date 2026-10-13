@@ -234,3 +234,9 @@ Re-theme by changing the token values there, keeping every text pair at
   idea holds `tabindex="0"` (the roving stop chosen by `rovingId`). A new
   edit path ends in `commit()` and gets its announcement for free — no
   second code path may set `aria-label` or speak its own way.
+- Deleting a map soft-deletes it: `maps.deleted_at` is set (from `req.now`),
+  and every map route filters `AND deleted_at IS NULL` so a trashed map
+  answers 404 for everyone, exactly like a missing one. It is kept 30 days
+  (`GET /api/trash`, `POST /api/maps/:id/restore`,
+  `DELETE /api/maps/:id/permanent`); the purge runs at boot and hourly and
+  uses real time (SQL `now()`), never `req.now`.
