@@ -220,10 +220,11 @@
 
     function setStatus(kind) {
       statusEl.hidden = readOnly || kind === 'none';
-      statusEl.classList.toggle('is-error', kind === 'error');
+      statusEl.classList.toggle('is-error', kind === 'error' || kind === 'conflict');
       if (kind === 'saving') { statusEl.textContent = 'Saving'; }
       else if (kind === 'saved') { statusEl.textContent = ''; statusEl.appendChild(icon('check')); statusEl.appendChild(document.createTextNode('Saved')); }
       else if (kind === 'error') { statusEl.textContent = 'Not saved'; }
+      else if (kind === 'conflict') { statusEl.textContent = 'Changed elsewhere'; }
       else if (kind === 'guest') { statusEl.textContent = 'Sign in to save'; }
       else { statusEl.textContent = ''; }
     }
@@ -1043,9 +1044,56 @@
     };
   }
 
+  // The sheet shown when a save was refused because the map changed in
+  // another tab or on another device (#12): keep the newer copy, keep this
+  // one, or save this one as a copy. Each button closes the sheet, then runs
+  // its handler; closing it any other way calls onDismiss. Returns the
+  // sheet's handle.
+  function conflictSheet(opts) {
+    if (!root.unNative) {
+      // Without the kit there is no sheet to put buttons in: OK loads the
+      // latest, Cancel leaves the map in conflict.
+      setTimeout(function () {
+        if (window.confirm('This map changed on another device. Load the latest? Your changes here will be dropped.')) opts.onLoadLatest();
+        else opts.onDismiss();
+      }, 0);
+      return { dismiss: function () {} };
+    }
+    var chosen = false;
+    var col = el('div');
+    col.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding:4px 4px 12px';
+    col.appendChild(el('h2', 'text-heading', 'This map changed on another device.'));
+    var note = el('p', 'text-small text-muted',
+      'Your latest changes here aren’t saved yet. Load the latest to see the other version, or keep yours and replace it.');
+    note.style.marginBottom = '8px';
+    col.appendChild(note);
+    var handle = null;
+    function action(cls, text, handler) {
+      var b = el('button', cls, text);
+      b.type = 'button';
+      b.style.width = '100%';
+      b.addEventListener('click', function () {
+        if (chosen) return;
+        chosen = true;
+        if (handle) handle.dismiss();
+        handler();
+      });
+      col.appendChild(b);
+    }
+    action('btn-primary', 'Load the latest', opts.onLoadLatest);
+    action('btn-secondary', 'Keep mine', opts.onKeepMine);
+    action('btn-secondary', 'Save mine as a copy', opts.onSaveCopy);
+    handle = root.unNative.presentSheet({
+      contentEl: col,
+      onDismiss: function () { if (!chosen) { chosen = true; opts.onDismiss(); } },
+    });
+    return handle;
+  }
+
   root.M2Canvas = {
     CanvasView: CanvasView,
     loadingEl: loadingEl,
     errorEl: errorEl,
+    conflictSheet: conflictSheet,
   };
 })(typeof self !== 'undefined' ? self : this);
