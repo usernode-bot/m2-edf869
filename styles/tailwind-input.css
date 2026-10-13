@@ -406,9 +406,9 @@
     gap: 6px;
     min-width: 0;
   }
-  /* Below 380 px the Share button keeps its icon and its aria-label only,
-     so Fit stays on screen. */
-  @media (max-width: 379px) {
+  /* Below 480 px the Maps and Share buttons keep their icons and their
+     aria-labels only, so Fit and the undo and redo buttons stay on screen. */
+  @media (max-width: 479px) {
     .topbar .btn-label {
       display: none;
     }
@@ -417,6 +417,10 @@
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+  .history {
+    display: flex;
+    gap: 4px;
   }
   .save-status {
     display: inline-flex;

@@ -157,6 +157,11 @@ Re-theme by changing the token values there, keeping every text pair at
 
 ## App-specific conventions
 
+- Every edit path in `public/js/canvas.js` calls `record(label)` before it
+  mutates the doc, so the change can be undone and redone (the history lives
+  in memory on the open view only, and read-only viewers get none). A later
+  feature that changes a map — recolour, reparent, collapse — follows the
+  same rule: record first, then mutate.
 - A map is one JSONB document (`{ v: 1, nodes: [...] }`), validated by
   `public/js/map-model.js` on both sides — the page and `server.js`
   require the same file, so never fork the validation.
@@ -193,4 +198,10 @@ Re-theme by changing the token values there, keeping every text pair at
   so they never pass for a branch, and go with either idea when it is
   deleted (`removeSubtree` carries them for Undo). At most 200 a map, names
   up to 60 characters.
+- `maps.revision` goes up by one on every save. `PUT /api/maps/:id` takes
+  `baseRevision` and writes only when it still matches; otherwise it answers
+  409 `{ error: 'conflict', revision, doc }` and `app.js` shows the conflict
+  sheet. A save without `baseRevision` (a tab opened before revisions
+  existed) still writes, last save wins; drop that path once old tabs are
+  gone. Any new write route that changes `doc` must bump `revision` too.
 - Avoid adding new dependencies; express, pg and jsonwebtoken cover it.

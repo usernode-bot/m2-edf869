@@ -23,6 +23,8 @@
     share: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg>',
     link: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5"/></svg>',
     keyboard: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01"/><path d="M10 10h.01"/><path d="M14 10h.01"/><path d="M18 10h.01"/><path d="M7 14h10"/></svg>',
+    undo: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>',
+    redo: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>',
   };
 
   // The keyboard shortcuts (#15), one table the sheet is drawn from, so the
@@ -141,6 +143,13 @@
     var els = new Map(); // node id -> button
     var linkEls = new Map(); // link id -> label button
 
+    // Undo and redo: snapshots of the doc before each edit, in memory only,
+    // so the history dies with the view and no other map ever sees it.
+    var undoStack = [], redoStack = [], HISTORY_MAX = 100;
+    var lastNudge = { id: null, at: 0 }; // rapid arrow-key moves of one idea
+    var deleteToast = null; // an open delete toast, dismissed by the next edit
+    var undoBtn = null, redoBtn = null;
+
     // The world, back to front: branches and link lines, link labels, ideas.
     var rootEl = el('div', 'canvas');
     rootEl.tabIndex = -1; // focusable, so keys work before any click
@@ -157,8 +166,9 @@
     if (opts.onOpenMaps) {
       var mapsBtn = el('button', 'btn-secondary');
       mapsBtn.type = 'button';
+      mapsBtn.setAttribute('aria-label', 'Maps');
       mapsBtn.appendChild(icon('grid'));
-      mapsBtn.appendChild(document.createTextNode('Maps'));
+      mapsBtn.appendChild(el('span', 'btn-label', 'Maps'));
       mapsBtn.addEventListener('click', opts.onOpenMaps);
       topbar.appendChild(mapsBtn);
     }
@@ -172,6 +182,22 @@
     var statusEl = el('span', 'save-status');
     statusEl.hidden = true;
     topRight.appendChild(statusEl);
+    if (!readOnly) {
+      var historyEl = el('div', 'history');
+      undoBtn = el('button', 'btn-secondary btn-icon undo-btn');
+      undoBtn.type = 'button';
+      undoBtn.appendChild(icon('undo'));
+      undoBtn.disabled = true;
+      undoBtn.addEventListener('click', undo);
+      historyEl.appendChild(undoBtn);
+      redoBtn = el('button', 'btn-secondary btn-icon redo-btn');
+      redoBtn.type = 'button';
+      redoBtn.appendChild(icon('redo'));
+      redoBtn.disabled = true;
+      redoBtn.addEventListener('click', redo);
+      historyEl.appendChild(redoBtn);
+      topRight.appendChild(historyEl);
+    }
     if (opts.onShare) {
       var shareBtn = el('button', 'btn-secondary');
       shareBtn.type = 'button';
@@ -258,10 +284,11 @@
 
     function setStatus(kind) {
       statusEl.hidden = readOnly || kind === 'none';
-      statusEl.classList.toggle('is-error', kind === 'error');
+      statusEl.classList.toggle('is-error', kind === 'error' || kind === 'conflict');
       if (kind === 'saving') { statusEl.textContent = 'Saving'; }
       else if (kind === 'saved') { statusEl.textContent = ''; statusEl.appendChild(icon('check')); statusEl.appendChild(document.createTextNode('Saved')); }
       else if (kind === 'error') { statusEl.textContent = 'Not saved'; }
+      else if (kind === 'conflict') { statusEl.textContent = 'Changed elsewhere'; }
       else if (kind === 'guest') { statusEl.textContent = 'Sign in to save'; }
       else { statusEl.textContent = ''; }
     }
@@ -304,6 +331,67 @@
       drawBranches();
       renderBar();
       opts.onChange();
+    }
+
+    // ── Undo and redo ────────────────────────────────────────────────────
+    // Every edit calls record(label) just before it mutates the doc, so the
+    // doc state before it is on the undo stack. A snapshot holds both the
+    // ideas and the links, so deleting an idea brings its links back too.
+    // A pending edit that turns out to change nothing pops its entry with
+    // unrecord(), only while it is still on top.
+
+    function record(label) {
+      var entry = { label: label, snap: M.snapshot(d) };
+      undoStack.push(entry);
+      if (undoStack.length > HISTORY_MAX) undoStack.shift();
+      redoStack.length = 0;
+      lastNudge = { id: null, at: 0 };
+      if (deleteToast && deleteToast.dismiss) deleteToast.dismiss();
+      deleteToast = null;
+      renderHistory();
+      return entry;
+    }
+
+    function unrecord(entry) {
+      if (undoStack.length && undoStack[undoStack.length - 1] === entry) {
+        undoStack.pop();
+        renderHistory();
+      }
+    }
+
+    function undo() {
+      if (!undoStack.length || gesture) return;
+      step(undoStack, redoStack);
+    }
+
+    function redo() {
+      if (!redoStack.length || gesture) return;
+      step(redoStack, undoStack);
+    }
+
+    function step(from, to) {
+      cancelLink(); // a Join waiting for its second idea stops first
+      var entry = from.pop();
+      to.push({ label: entry.label, snap: M.snapshot(d) });
+      M.replaceWith(d, entry.snap);
+      if (selectedId && !M.node(d, selectedId)) selectedId = null;
+      render();
+      select(selectedId);
+      commit();
+      lastNudge = { id: null, at: 0 };
+      renderHistory();
+    }
+
+    function renderHistory() {
+      if (!undoBtn) return;
+      var u = undoStack[undoStack.length - 1];
+      var r = redoStack[redoStack.length - 1];
+      undoBtn.disabled = !u;
+      redoBtn.disabled = !r;
+      undoBtn.title = u ? 'Undo ' + u.label : 'Undo';
+      undoBtn.setAttribute('aria-label', undoBtn.title);
+      redoBtn.title = r ? 'Redo ' + r.label : 'Redo';
+      redoBtn.setAttribute('aria-label', redoBtn.title);
     }
 
     // ── Rendering ────────────────────────────────────────────────────────
@@ -667,6 +755,7 @@
           gesture.moved = true;
           gesture.kind = 'drag';
           closeMenu(); // dragging the idea closes its menu
+          record('move idea'); // the whole drag is one undo step
         }
         var wdx = (e.clientX - (gesture.lastX == null ? gesture.x : gesture.lastX)) / scale;
         var wdy = (e.clientY - (gesture.lastY == null ? gesture.y : gesture.lastY)) / scale;
@@ -895,9 +984,10 @@
       var parent = selNode() || M.node(d, 'root');
       if (!M.canAddUnder(d, parent.id)) return;
       sheetForm('Idea', 'e.g. Book a table', '', 'Add idea', M.MAX_TEXT, function (text) {
+        var entry = record('add idea');
         // The parent's measured width, so the new idea clears its text.
         var n = M.addIdea(d, parent.id, text, widthOf(parent));
-        if (!n) return;
+        if (!n) { unrecord(entry); return; }
         render();
         var b = els.get(n.id);
         if (b && !reducedMotion) b.classList.add('idea-in');
@@ -960,6 +1050,7 @@
       var n = M.node(d, id || selectedId);
       if (!n) return;
       sheetForm('Idea', 'e.g. Book a table', n.text, 'Save', n.id === 'root' ? M.MAX_ROOT_TEXT : M.MAX_TEXT, function (text) {
+        if (text !== n.text) record('rename idea'); // the same text is no edit
         M.rename(d, n.id, text);
         var b = els.get(n.id);
         if (b) b.textContent = text;
@@ -1000,6 +1091,7 @@
     function deleteIdea(id) {
       if (!M.node(d, id)) return;
       var parentId = M.node(d, id).parent;
+      var entry = record('delete idea');
       var removed = M.removeSubtree(d, id);
       var under = removed.length - 1;
       var text = removed[0].text;
@@ -1008,16 +1100,18 @@
       commit();
       setTimeout(function () { focusIdea(parentId || null); }, 0);
       var message = 'Deleted ' + text + (under > 0 ? ' and ' + under + ' idea' + (under === 1 ? '' : 's') + ' under it' : '');
-      un.toast(message, {
+      deleteToast = un.toast(message, {
         priority: true,
         action: {
           label: 'Undo',
           handler: function () {
-            M.restore(d, removed);
-            render();
-            commit();
-            select(id);
-            setTimeout(function () { focusIdea(id); }, 0);
+            // Only while the delete is still the last edit, so the toast can
+            // never undo something newer than the delete it names.
+            if (undoStack[undoStack.length - 1] === entry) {
+              undo();
+              select(id);
+              setTimeout(function () { focusIdea(id); }, 0);
+            }
           },
         },
       });
@@ -1054,7 +1148,8 @@
         return;
       }
       sheetForm('Link name', 'e.g. Depends on', '', 'Add link', M.MAX_LINK_TEXT, function (text) {
-        if (!M.addLink(d, from, id, text)) return;
+        var entry = record('add link');
+        if (!M.addLink(d, from, id, text)) { unrecord(entry); return; }
         render(); // the first idea stays selected
         commit();
       }, { allowEmpty: true });
@@ -1065,6 +1160,7 @@
       var l = M.linkById(d, id);
       if (!l) return;
       sheetForm('Link name', 'e.g. Depends on', l.text, 'Save', M.MAX_LINK_TEXT, function (text) {
+        if (text !== l.text) record('rename link'); // the same name is no edit
         M.renameLink(d, id, text);
         render();
         commit();
@@ -1073,18 +1169,17 @@
         extra: {
           label: 'Delete link',
           onClick: function () {
+            var entry = record('delete link');
             var removed = M.removeLink(d, id);
-            if (!removed) return;
+            if (!removed) { unrecord(entry); return; }
             render();
             commit();
-            un.toast('Deleted link', {
+            deleteToast = un.toast('Deleted link', {
               priority: true,
               action: {
                 label: 'Undo',
                 handler: function () {
-                  M.restoreLinks(d, [removed]);
-                  render();
-                  commit();
+                  if (undoStack[undoStack.length - 1] === entry) undo();
                 },
               },
             });
@@ -1205,6 +1300,10 @@
           var dy = dir === 'up' ? -step : dir === 'down' ? step : 0;
           var nudged = focusedId || selectedId;
           if (nudged) {
+            // Rapid nudges of the same idea are one undo step; record() resets
+            // lastNudge, so the new one is set after it.
+            var now = Date.now();
+            if (!(lastNudge.id === nudged && now - lastNudge.at < 1000)) record('move idea');
             M.moveSubtree(d, nudged, dx, dy);
             M.subtree(d, nudged).forEach(function (m) {
               var b = els.get(m.id);
@@ -1212,6 +1311,7 @@
             });
             drawBranchesSoon();
             commit();
+            lastNudge = { id: nudged, at: now };
           }
           e.preventDefault();
           return;
@@ -1304,6 +1404,7 @@
     container.appendChild(rootEl);
     render();
     renderBar();
+    renderHistory(); // both start empty, so both buttons start disabled
     // Measure once the layout has settled, then fit the whole map and put
     // the keys on the paper straight away.
     requestAnimationFrame(function () {
@@ -1315,20 +1416,86 @@
     var onResize = function () { placeMenu(); };
     root.addEventListener('resize', onResize);
 
+    // Undo and redo also work when nothing on the canvas has focus (after a
+    // click on a top-bar button, say). Fields keep their own text undo.
+    function onHistoryKey(e) {
+      if (e.altKey) return;
+      var t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (!(e.ctrlKey || e.metaKey)) return;
+      var k = e.key.toLowerCase();
+      if (k === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) redo(); else undo();
+      } else if (k === 'y' && e.ctrlKey) {
+        e.preventDefault();
+        redo();
+      }
+    }
+    if (!readOnly) document.addEventListener('keydown', onHistoryKey);
+
     return {
       el: rootEl,
       setStatus: setStatus,
       fit: function () { fit(true); },
       destroy: function () {
+        if (!readOnly) document.removeEventListener('keydown', onHistoryKey);
         root.removeEventListener('resize', onResize);
         container.textContent = '';
       },
     };
   }
 
+  // The sheet shown when a save was refused because the map changed in
+  // another tab or on another device (#12): keep the newer copy, keep this
+  // one, or save this one as a copy. Each button closes the sheet, then runs
+  // its handler; closing it any other way calls onDismiss. Returns the
+  // sheet's handle.
+  function conflictSheet(opts) {
+    if (!root.unNative) {
+      // Without the kit there is no sheet to put buttons in: OK loads the
+      // latest, Cancel leaves the map in conflict.
+      setTimeout(function () {
+        if (window.confirm('This map changed on another device. Load the latest? Your changes here will be dropped.')) opts.onLoadLatest();
+        else opts.onDismiss();
+      }, 0);
+      return { dismiss: function () {} };
+    }
+    var chosen = false;
+    var col = el('div');
+    col.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding:4px 4px 12px';
+    col.appendChild(el('h2', 'text-heading', 'This map changed on another device.'));
+    var note = el('p', 'text-small text-muted',
+      'Your latest changes here aren’t saved yet. Load the latest to see the other version, or keep yours and replace it.');
+    note.style.marginBottom = '8px';
+    col.appendChild(note);
+    var handle = null;
+    function action(cls, text, handler) {
+      var b = el('button', cls, text);
+      b.type = 'button';
+      b.style.width = '100%';
+      b.addEventListener('click', function () {
+        if (chosen) return;
+        chosen = true;
+        if (handle) handle.dismiss();
+        handler();
+      });
+      col.appendChild(b);
+    }
+    action('btn-primary', 'Load the latest', opts.onLoadLatest);
+    action('btn-secondary', 'Keep mine', opts.onKeepMine);
+    action('btn-secondary', 'Save mine as a copy', opts.onSaveCopy);
+    handle = root.unNative.presentSheet({
+      contentEl: col,
+      onDismiss: function () { if (!chosen) { chosen = true; opts.onDismiss(); } },
+    });
+    return handle;
+  }
+
   root.M2Canvas = {
     CanvasView: CanvasView,
     loadingEl: loadingEl,
     errorEl: errorEl,
+    conflictSheet: conflictSheet,
   };
 })(typeof self !== 'undefined' ? self : this);
