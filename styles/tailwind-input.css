@@ -315,9 +315,10 @@
   .idea-sub.left {
     transform: translate(-100%, -50%);
   }
-  /* Ideas wrap only past about 220 px, so short ones stay on one line. */
+  /* Ideas wrap only past about 220 px, so short ones stay on one line.
+     Newlines are kept (Shift+Enter inside the inline editor puts one in). */
   .idea {
-    white-space: normal;
+    white-space: pre-line;
     word-break: break-word;
   }
   .idea.is-selected {
@@ -350,6 +351,39 @@
     transform: translateY(-50%);
     pointer-events: none;
     z-index: 1;
+  }
+  /* The inline editor (#14): the idea's own look made editable. The same
+     outline the selected idea wears, a text cursor, and room for an empty
+     one to be clicked into. */
+  .idea.is-editing {
+    cursor: text;
+    white-space: pre-wrap;
+    overflow: visible;
+    text-overflow: clip;
+    min-width: 4ch;
+    outline: 2px solid rgb(var(--focus));
+    outline-offset: 3px;
+    border-radius: 6px;
+  }
+  .idea-central.is-editing,
+  .idea-main.is-editing {
+    border-radius: 999px;
+  }
+  /* A new idea waits with a faint placeholder until words are typed. */
+  .idea.is-editing:empty::before {
+    content: attr(data-placeholder);
+    color: rgb(var(--muted));
+    pointer-events: none;
+  }
+  /* The characters-left count, shown beside an edit only near the limit.
+     Placed in the world by canvas.js, so it follows the idea. */
+  .edit-count {
+    position: absolute;
+    font-size: 14px;
+    line-height: 20px;
+    color: rgb(var(--muted));
+    white-space: nowrap;
+    pointer-events: none;
   }
   /* A new idea grows out of its parent (answers the action only). */
   @keyframes idea-in {
@@ -428,9 +462,9 @@
     gap: 6px;
     min-width: 0;
   }
-  /* Below 380 px the Share button keeps its icon and its aria-label only,
-     so Fit stays on screen. */
-  @media (max-width: 379px) {
+  /* Below 480 px the Maps and Share buttons keep their icons and their
+     aria-labels only, so Fit and the undo and redo buttons stay on screen. */
+  @media (max-width: 479px) {
     .topbar .btn-label {
       display: none;
     }
@@ -439,6 +473,10 @@
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+  .history {
+    display: flex;
+    gap: 4px;
   }
   .save-status {
     display: inline-flex;
@@ -645,5 +683,43 @@
     align-items: center;
     gap: 12px;
     z-index: 10;
+  }
+  /* The canvas takes the keys, so it never draws its own focus ring — the
+     selected idea shows where the keys are instead. */
+  .canvas:focus {
+    outline: none;
+  }
+
+  /* The shortcuts sheet (#15): a row of key caps beside what they do. */
+  .shortcut-row {
+    @apply flex items-center gap-3;
+  }
+  .shortcut-text {
+    @apply flex-1 min-w-0 text-small text-fg;
+  }
+  .keys {
+    @apply inline-flex flex-none items-center gap-1;
+  }
+  /* One key cap: a small raised chip with a hard bottom edge, like a key. */
+  .key {
+    @apply inline-flex items-center justify-center rounded-md border border-line bg-raised;
+    min-width: 24px;
+    padding: 1px 7px 2px;
+    border-bottom-width: 2px;
+    font-size: 13px;
+    line-height: 18px;
+    font-weight: 600;
+    color: rgb(var(--fg));
+  }
+
+  /* The keyboard button in the top bar: a keyboard-width screen only, where
+     the sheet it opens is not already openable with ?. */
+  .kbd-btn {
+    display: none;
+  }
+  @media (min-width: 768px) {
+    .kbd-btn {
+      display: inline-flex;
+    }
   }
 }

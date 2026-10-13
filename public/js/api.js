@@ -25,7 +25,12 @@
       if (!res.ok) {
         var err = new Error('API ' + method + ' ' + path + ' failed with ' + res.status);
         err.status = res.status;
-        throw err;
+        // The JSON body, when there is one: a save conflict (409) carries the
+        // server's current copy of the map.
+        return res.json().catch(function () { return null; }).then(function (body) {
+          err.body = body;
+          throw err;
+        });
       }
       if (res.status === 204) return null;
       return res.json();
