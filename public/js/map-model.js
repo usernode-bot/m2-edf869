@@ -1015,6 +1015,28 @@
     return out;
   }
 
+  // The tree as a screen reader should hear it: every idea in pre-order
+  // from the centre, each with its level (the central idea is level 1),
+  // its rank among the siblings it is shown with, how many sit at that
+  // rank, and whether it has ideas under it (for aria-expanded). A node
+  // whose parent is gone never appears. Pure: the doc comes back untouched.
+  function treeOrder(doc) {
+    var out = [];
+    var rootN = node(doc, 'root');
+    if (!rootN) return out;
+    out.push({ node: rootN, level: 1, pos: 1, size: 1,
+      hasChildren: childrenOf(doc, 'root').length > 0 });
+    (function walk(pid, level) {
+      var kids = childrenOf(doc, pid);
+      kids.forEach(function (n, i) {
+        out.push({ node: n, level: level, pos: i + 1, size: kids.length,
+          hasChildren: childrenOf(doc, n.id).length > 0 });
+        walk(n.id, level + 1);
+      });
+    })('root', 2);
+    return out;
+  }
+
   return {
     MAX_NODES: MAX_NODES,
     MAX_TEXT: MAX_TEXT,
@@ -1062,6 +1084,7 @@
     removeLinksFor: removeLinksFor,
     restoreLinks: restoreLinks,
     search: search,
+    treeOrder: treeOrder,
     snapshot: snapshot,
     replaceWith: replaceWith,
     validate: validate,
