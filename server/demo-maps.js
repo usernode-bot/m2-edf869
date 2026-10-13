@@ -140,4 +140,15 @@ function sharedDemoDoc() {
   ]);
 }
 
-module.exports = { demoMaps, lisbonDoc, sharedDemoDoc };
+// The staging demo's trashed map, seeded into the viewer's own Recently
+// deleted 18 days ago (so "Deletes in 12 days") on every ?demo=1 load.
+function trashedDemoDoc() {
+  return buildDoc('Staging demo: Moving house', [
+    ['Boxes', ['Label each room', 'Heavy items last']],
+    ['Utilities', ['Meter readings', 'Redirect post']],
+    ['New address', ['Tell the bank', 'Update deliveries']],
+    ['Moving day', ['Hire the van', 'Keys handover']],
+  ]);
+}
+
+module.exports = { demoMaps, lisbonDoc, sharedDemoDoc, trashedDemoDoc };

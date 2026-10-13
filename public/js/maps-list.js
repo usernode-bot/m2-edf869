@@ -20,6 +20,8 @@
     var icons = {
       plus: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
       more: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>',
+      bin: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/></svg>',
+      chevron: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
     };
     span.innerHTML = icons[name]; // static markup written here, never user text
     return span.firstChild;
@@ -80,6 +82,7 @@
     container.appendChild(wrap);
     var listData = null;
     var sharedData = [];
+    var trashedCount = 0;
     var guest = false;
     var demo = !!opts.demo;
     var swipeHandles = [];
@@ -141,19 +144,33 @@
       state.appendChild(newEmpty);
       body.appendChild(state);
       renderShared();
+      renderTrashRow();
     }
 
     function confirmDelete(map) {
       un.alert({
         title: 'Delete ' + map.title + '?',
-        message: 'This deletes the map and its ' + map.ideaCount + ' ideas.',
+        message: 'It stays in Recently deleted for 30 days.',
         buttons: [
           { label: 'Cancel', style: 'cancel' },
           {
             label: 'Delete',
             style: 'destructive',
             handler: function () {
-              api('DELETE', '/api/maps/' + map.id).then(load).catch(function () {
+              api('DELETE', '/api/maps/' + map.id).then(function () {
+                // Undo puts the map straight back, sharing and all.
+                un.toast('Moved to Recently deleted', {
+                  action: {
+                    label: 'Undo',
+                    handler: function () {
+                      api('POST', '/api/maps/' + map.id + '/restore').then(load).catch(function () {
+                        un.toast('Couldn’t restore ' + map.title);
+                      });
+                    },
+                  },
+                });
+                load();
+              }).catch(function () {
                 un.toast('Couldn’t delete ' + map.title);
               });
             },
@@ -243,6 +260,41 @@
       body.appendChild(list);
     }
 
+    // The row at the bottom of Your maps that opens Recently deleted. Only
+    // when something is in there, so it also shows on an otherwise empty
+    // list (setEmpty).
+    function renderTrashRow() {
+      if (guest || trashedCount <= 0) return;
+      var label = el('h2', 'section-label', 'Recently deleted');
+      label.style.marginTop = '20px';
+      body.appendChild(label);
+      var list = el('ul', 'list');
+      var li = el('li', 'list-row');
+      var box = el('span');
+      box.style.cssText = 'width:64px;height:48px;border-radius:10px;background:rgb(var(--panel, var(--surface)));flex:none;display:flex;align-items:center;justify-content:center';
+      box.appendChild(icon('bin'));
+      box.style.color = 'rgb(var(--muted))';
+      var textCol = el('div');
+      textCol.style.cssText = 'flex:1;min-width:0';
+      textCol.appendChild(el('p', 'text-body font-semibold', 'Recently deleted'));
+      textCol.appendChild(el('p', 'text-small text-muted',
+        trashedCount + (trashedCount === 1 ? ' map, kept for 30 days' : ' maps, kept for 30 days')));
+      var open = el('button');
+      open.type = 'button';
+      open.style.cssText = 'display:flex;flex:1;min-width:0;align-items:center;gap:12px;text-align:left;background:none;border:0;padding:0;font:inherit;color:inherit;cursor:pointer';
+      open.setAttribute('aria-label', 'Open Recently deleted');
+      open.appendChild(box);
+      open.appendChild(textCol);
+      open.addEventListener('click', function () { opts.onOpenTrash(); });
+      li.appendChild(open);
+      var chev = el('span');
+      chev.style.cssText = 'width:44px;height:44px;display:inline-flex;align-items:center;justify-content:center;color:rgb(var(--muted));flex:none';
+      chev.appendChild(icon('chevron'));
+      li.appendChild(chev);
+      list.appendChild(li);
+      body.appendChild(list);
+    }
+
     function render() {
       swipeHandles.forEach(function (h) { h.detach(); });
       swipeHandles = [];
@@ -270,6 +322,7 @@
       });
       body.appendChild(list);
       renderShared();
+      renderTrashRow();
     }
 
     function renderFoot() {
@@ -306,6 +359,7 @@
           listData = r.maps;
         }
         sharedData = guest ? [] : (r.shared || []);
+        trashedCount = guest ? 0 : (r.trashed || 0);
         newBtn.hidden = guest;
         if (listData.length === 0) setEmpty(); else render();
       }).catch(function () { setError(); });
@@ -354,4 +408,150 @@
   }
 
   root.M2MapsList = MapsList;
+
+  // ── Recently deleted (#30) ─────────────────────────────────────────────
+  // Its own screen: the owner's trashed maps with how long each has left.
+  // Restore puts a map straight back with its sharing untouched; Delete now
+  // asks first, then the map is gone for good.
+  function TrashList(container, opts) {
+    var un = root.unNative || {
+      alert: function (o) {
+        var del = (o.buttons || []).filter(function (b) { return b.style === 'destructive'; })[0];
+        if (del && window.confirm(o.title + (o.message ? ' ' + o.message : '')) && del.handler) del.handler();
+        return Promise.resolve({ button: null });
+      },
+      toast: function (m) { console.log('toast:', m); return { dismiss: function () {} }; },
+    };
+    var wrap = el('div');
+    wrap.style.cssText = 'min-height:100vh;padding:16px 16px 32px';
+    container.textContent = '';
+    container.appendChild(wrap);
+
+    var back = el('button', 'btn-secondary', 'Back to maps');
+    back.type = 'button';
+    back.addEventListener('click', function () { opts.onBack(); });
+    wrap.appendChild(back);
+    wrap.appendChild(el('h1', 'text-title', 'Recently deleted')).style.cssText = 'margin:16px 0 4px';
+    wrap.appendChild(el('p', 'text-small text-muted', 'Deleted maps stay here for 30 days, then they are deleted for good.'));
+
+    var body = el('div');
+    body.style.marginTop = '16px';
+    wrap.appendChild(body);
+
+    function setLoading() {
+      body.textContent = '';
+      var list = el('ul', 'list');
+      for (var i = 0; i < 3; i++) {
+        var row = el('li', 'list-row');
+        var sk = el('div', 'skeleton');
+        sk.style.cssText = 'width:64px;height:48px;border-radius:10px;flex:none';
+        row.appendChild(sk);
+        var col = el('div');
+        col.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:6px';
+        col.appendChild(el('div', 'skeleton')).style.cssText = 'height:16px;width:40%';
+        col.appendChild(el('div', 'skeleton')).style.cssText = 'height:12px;width:30%';
+        row.appendChild(col);
+        list.appendChild(row);
+      }
+      body.appendChild(list);
+    }
+
+    function setError() {
+      body.textContent = '';
+      var state = el('div', 'state-error');
+      state.appendChild(el('p', 'text-body font-semibold', 'Couldn’t load Recently deleted.'));
+      state.appendChild(el('p', 'text-small text-muted', 'Your maps are safe. Check your connection and try again.'));
+      var btn = el('button', 'btn-secondary', 'Retry');
+      btn.type = 'button';
+      btn.addEventListener('click', load);
+      state.appendChild(btn);
+      body.appendChild(state);
+    }
+
+    function setEmpty() {
+      body.textContent = '';
+      var state = el('div', 'state-empty');
+      state.appendChild(el('p', 'text-heading', 'Nothing in Recently deleted'));
+      state.appendChild(el('p', 'text-small text-muted', 'Maps you delete stay here for 30 days.'));
+      body.appendChild(state);
+    }
+
+    function restore(map, btn) {
+      btn.disabled = true;
+      api('POST', '/api/maps/' + map.id + '/restore').then(function () {
+        un.toast('Restored ' + map.title);
+        load();
+      }).catch(function () {
+        btn.disabled = false;
+        un.toast('Couldn’t restore ' + map.title);
+      });
+    }
+
+    function deleteNow(map) {
+      un.alert({
+        title: 'Delete ' + map.title + ' now?',
+        message: 'This can’t be undone. Its ' + map.ideaCount + (map.ideaCount === 1 ? ' idea is' : ' ideas are') + ' deleted for good.',
+        buttons: [
+          { label: 'Cancel', style: 'cancel' },
+          {
+            label: 'Delete',
+            style: 'destructive',
+            handler: function () {
+              api('DELETE', '/api/maps/' + map.id + '/permanent').then(function () {
+                un.toast('Deleted ' + map.title + ' for good');
+                load();
+              }).catch(function () {
+                un.toast('Couldn’t delete ' + map.title);
+              });
+            },
+          },
+        ],
+      });
+    }
+
+    function trashRow(map) {
+      var row = el('li', 'list-row');
+      row.style.alignItems = 'flex-start';
+      row.appendChild(thumbSvg(map.outline));
+      var col = el('div');
+      col.style.cssText = 'flex:1;min-width:0';
+      col.appendChild(el('p', 'text-body font-semibold', map.title));
+      col.appendChild(el('p', 'text-small text-muted',
+        'Deletes in ' + map.daysLeft + (map.daysLeft === 1 ? ' day' : ' days')));
+      var actions = el('div');
+      actions.style.cssText = 'display:flex;gap:8px;margin-top:10px';
+      var keep = el('button', 'btn-secondary', 'Restore');
+      keep.type = 'button';
+      keep.addEventListener('click', function () { restore(map, keep); });
+      var gone = el('button', 'btn-secondary', 'Delete now');
+      gone.type = 'button';
+      gone.style.color = 'rgb(var(--danger))';
+      gone.addEventListener('click', function () { deleteNow(map); });
+      actions.appendChild(keep);
+      actions.appendChild(gone);
+      col.appendChild(actions);
+      row.appendChild(col);
+      return row;
+    }
+
+    function load() {
+      setLoading();
+      api('GET', '/api/trash').then(function (r) {
+        if (!r.maps.length) { setEmpty(); return; }
+        body.textContent = '';
+        var list = el('ul', 'list');
+        r.maps.forEach(function (map) { list.appendChild(trashRow(map)); });
+        body.appendChild(list);
+      }).catch(setError);
+    }
+
+    load();
+
+    return {
+      el: wrap,
+      destroy: function () { container.textContent = ''; },
+    };
+  }
+
+  root.M2TrashList = TrashList;
 })(typeof self !== 'undefined' ? self : this);
