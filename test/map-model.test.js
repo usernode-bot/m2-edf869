@@ -282,3 +282,100 @@ test('walking and adding never strand the keys', function () {
     });
   });
 });
+
+// ---- Colour palette (#20): ten colours, setColor, pickFreeColor ----
+
+// A raw map with the main ideas given straight: text, side (x sign) and
+// colour, so a test can lay out any palette situation.
+function mainsDoc(list) {
+  const doc = { v: 1, nodes: [{ id: 'root', parent: null, text: 'Centre', x: 0, y: 0 }], links: [] };
+  list.forEach(function (m, i) {
+    doc.nodes.push({
+      id: 'm' + i, parent: 'root', text: m.text, x: m.side * (200 + 80 * i), y: 50 * i,
+      color: m.color,
+    });
+  });
+  return doc;
+}
+
+test('validate takes colours 0 to 9 on a main idea, and nothing outside', () => {
+  for (let c = 0; c < M.COLORS; c++) {
+    const doc = mainsDoc([{ text: 'M', side: 1, color: c }]);
+    assert.equal(M.validate(doc), null, 'colour ' + c + ' is on the palette');
+  }
+  [M.COLORS, -1, 1.5].forEach(function (c) {
+    const doc = mainsDoc([{ text: 'M', side: 1, color: c }]);
+    assert.equal(M.validate(doc), 'bad color');
+  });
+});
+
+test('a colour on a deeper idea still fails validation', () => {
+  const doc = mainsDoc([{ text: 'M', side: 1, color: 0 }]);
+  const kid = { id: 'k', parent: 'm0', text: 'Kid', x: 300, y: 0, color: 1 };
+  doc.nodes.push(kid);
+  assert.equal(M.validate(doc), 'color on a non-main idea');
+});
+
+test('old maps with colours 0 to 4 read exactly as they did', () => {
+  const doc = mainsDoc([
+    { text: 'A', side: 1, color: 0 },
+    { text: 'B', side: -1, color: 1 },
+    { text: 'C', side: 1, color: 2 },
+    { text: 'D', side: -1, color: 3 },
+    { text: 'E', side: 1, color: 4 },
+  ]);
+  assert.equal(M.validate(doc), null);
+  const ids = ['A', 'B', 'C', 'D', 'E'].map((t) => byText(doc, t).id);
+  ids.forEach(function (id, i) {
+    assert.equal(M.branchColor(doc, id), i);
+    assert.equal(M.branchColor(doc, byText(doc, 'A').id), 0); // unchanged each pass
+  });
+});
+
+test('the example map keeps its first five branches on colours 0 to 4', () => {
+  const doc = exampleDoc();
+  const mains = M.childrenOf(doc, 'root');
+  assert.equal(mains.length, 5);
+  mains.forEach(function (n, i) {
+    assert.equal(n.color, i, 'main ' + i + ' keeps colour ' + i);
+  });
+});
+
+test('a new main idea takes the first colour no main idea uses', () => {
+  const doc = mainsDoc([
+    { text: 'A', side: 1, color: 0 },
+    { text: 'B', side: -1, color: 1 },
+    { text: 'C', side: 1, color: 2 },
+    { text: 'D', side: -1, color: 3 },
+    { text: 'E', side: 1, color: 4 },
+  ]);
+  assert.equal(M.pickFreeColor(doc, 1), M.COLORS - 5); // the sixth colour
+  // Freeing a colour makes it the next pick, before anything later.
+  M.removeSubtree(doc, byText(doc, 'C').id);
+  assert.equal(M.pickFreeColor(doc, 1), 2);
+});
+
+test('with all colours used, the pick goes to the idea’s own side first', () => {
+  // Ten mains, every colour used, but the right side is missing colour 9.
+  const list = [];
+  for (let i = 0; i < 9; i++) list.push({ text: 'R' + i, side: 1, color: i });
+  list.push({ text: 'L', side: -1, color: 9 });
+  const doc = mainsDoc(list);
+  assert.equal(M.pickFreeColor(doc, 1), 9); // unused on the right side
+  // ...and the left side is missing none of them, so the rotation answers.
+  assert.equal(M.pickFreeColor(doc, -1), list.length % M.COLORS);
+});
+
+test('setColor changes a main idea and refuses everything else', () => {
+  const { doc, a, a1, b } = smallDoc();
+  assert.equal(M.setColor(doc, a.id, M.COLORS - 1), true);
+  assert.equal(a.color, M.COLORS - 1);
+  assert.equal(M.validate(doc), null);
+  assert.equal(M.setColor(doc, 'root', 0), false, 'the root has no colour');
+  assert.equal(M.setColor(doc, a1.id, 1), false, 'a deeper idea has no colour of its own');
+  assert.equal(M.setColor(doc, b.id, M.COLORS), false, 'past the palette');
+  assert.equal(M.setColor(doc, b.id, -1), false, 'before the palette');
+  assert.equal(M.setColor(doc, b.id, 1.5), false, 'not a whole colour');
+  assert.equal(b.color, 1, 'refused colours change nothing');
+  assert.equal(M.validate(doc), null);
+});
