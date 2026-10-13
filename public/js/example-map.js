@@ -20,7 +20,7 @@
     var colours = add('root', 'Colours');
     var tidy = add('root', 'Tidy up');
     add(adding, 'Select an idea');
-    add(adding, 'Then Add idea');
+    add(adding, 'Add idea, then type');
     add(moving, 'Drag any idea');
     add(moving, 'Its ideas come along');
     add(renaming, 'Double tap an idea');

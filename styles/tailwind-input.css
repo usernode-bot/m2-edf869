@@ -315,9 +315,10 @@
   .idea-sub.left {
     transform: translate(-100%, -50%);
   }
-  /* Ideas wrap only past about 220 px, so short ones stay on one line. */
+  /* Ideas wrap only past about 220 px, so short ones stay on one line.
+     Newlines are kept (Shift+Enter inside the inline editor puts one in). */
   .idea {
-    white-space: normal;
+    white-space: pre-line;
     word-break: break-word;
   }
   .idea.is-selected {
@@ -328,6 +329,39 @@
   .idea-central.is-selected,
   .idea-main.is-selected {
     border-radius: 999px;
+  }
+  /* The inline editor (#14): the idea's own look made editable. The same
+     outline the selected idea wears, a text cursor, and room for an empty
+     one to be clicked into. */
+  .idea.is-editing {
+    cursor: text;
+    white-space: pre-wrap;
+    overflow: visible;
+    text-overflow: clip;
+    min-width: 4ch;
+    outline: 2px solid rgb(var(--focus));
+    outline-offset: 3px;
+    border-radius: 6px;
+  }
+  .idea-central.is-editing,
+  .idea-main.is-editing {
+    border-radius: 999px;
+  }
+  /* A new idea waits with a faint placeholder until words are typed. */
+  .idea.is-editing:empty::before {
+    content: attr(data-placeholder);
+    color: rgb(var(--muted));
+    pointer-events: none;
+  }
+  /* The characters-left count, shown beside an edit only near the limit.
+     Placed in the world by canvas.js, so it follows the idea. */
+  .edit-count {
+    position: absolute;
+    font-size: 14px;
+    line-height: 20px;
+    color: rgb(var(--muted));
+    white-space: nowrap;
+    pointer-events: none;
   }
   /* A new idea grows out of its parent (answers the action only). */
   @keyframes idea-in {

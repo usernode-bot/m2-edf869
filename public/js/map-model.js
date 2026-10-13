@@ -105,19 +105,18 @@
 
   function trim(t) { return typeof t === 'string' ? t.trim() : ''; }
 
-  // Add an idea under parentId, placed by the same rules the canvas uses, and
-  // return the new node. Under the root the side with fewer main ideas grows
-  // the next branch; anywhere else the new idea sits beside its parent, past
-  // the end of the parent's own text so the two never overlap, however deep
-  // the map goes. `parentWidth` is the parent's drawn width when the page has
-  // measured it; without it the width is estimated from the text. Returns
-  // null past MAX_DEPTH.
-  function addIdea(doc, parentId, text, parentWidth) {
+  // Where the next idea under parentId goes, without changing the doc:
+  // { x, y, color } (the colour only under the root), or null past MAX_DEPTH.
+  // Under the root the side with fewer main ideas grows the next branch;
+  // anywhere else the idea sits beside its parent, past the end of the
+  // parent's own text so the two never overlap, however deep the map goes.
+  // `parentWidth` is the parent's drawn width when the page has measured it;
+  // without it the width is estimated from the text. The inline editor uses
+  // this to show a draft idea before its text exists.
+  function placeIdea(doc, parentId, parentWidth) {
     var parent = node(doc, parentId);
     if (!parent || !canAddUnder(doc, parentId)) return null;
-    var t = trim(text);
-    if (!t) return null;
-    var id = newId(), x, y, color;
+    var x, y, color;
     if (parentId === 'root') {
       var mains = childrenOf(doc, 'root');
       var right = mains.filter(function (n) { return n.x >= 0; }).length;
@@ -147,8 +146,18 @@
       var kids = childrenOf(doc, parentId);
       y = kids.length ? kids[kids.length - 1].y + 50 : parent.y;
     }
-    var n = { id: id, parent: parentId, text: t, x: x, y: y };
-    if (parentId === 'root') n.color = color;
+    return { x: x, y: y, color: parentId === 'root' ? color : null };
+  }
+
+  // Add an idea under parentId, placed by the same rules the canvas uses, and
+  // return the new node. Returns null for empty text or past MAX_DEPTH.
+  function addIdea(doc, parentId, text, parentWidth) {
+    var t = trim(text);
+    if (!t) return null;
+    var p = placeIdea(doc, parentId, parentWidth);
+    if (!p) return null;
+    var n = { id: newId(), parent: parentId, text: t, x: p.x, y: p.y };
+    if (p.color != null) n.color = p.color;
     doc.nodes.push(n);
     return n;
   }
@@ -394,6 +403,7 @@
     isPill: isPill,
     canAddUnder: canAddUnder,
     addIdea: addIdea,
+    placeIdea: placeIdea,
     rename: rename,
     moveSubtree: moveSubtree,
     removeSubtree: removeSubtree,

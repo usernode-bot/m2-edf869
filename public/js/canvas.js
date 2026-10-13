@@ -276,6 +276,7 @@
     }
 
     function render() {
+      if (editing) finishEdit(true, false); // a rebuild ends the edit
       closeMenu(); // the buttons are rebuilt, so the menu's anchor would dangle
       els.forEach(function (old) { if (old.parentNode) old.parentNode.removeChild(old); });
       els.clear();
@@ -358,6 +359,23 @@
 
     function drawBranches() {
       var paths = '';
+      // The idea being typed draws its branch too, so it grows out of its
+      // parent as words go in.
+      if (editing && !editing.id) {
+        var dp = M.node(d, editing.parentId);
+        if (dp) {
+          var ds = edgeStart(dp);
+          var ddep = M.depth(d, editing.parentId) + 1;
+          var dw = ddep === 1 ? 'w1' : ddep === 2 ? 'w2' : 'w3';
+          var dc = editing.parentId === 'root'
+            ? M.childrenOf(d, 'root').length % M.COLORS
+            : M.branchColor(d, editing.parentId);
+          var dmx = (ds[0] + editing.x) / 2;
+          paths += '<path class="' + dw + ' ' + COLOR_CLASSES[dc == null ? 0 : dc] +
+            '" d="M' + ds[0] + ' ' + ds[1] + 'C' + dmx + ' ' + ds[1] + ', ' +
+            dmx + ' ' + editing.y + ', ' + editing.x + ' ' + editing.y + '"/>';
+        }
+      }
       M.nodes(d).forEach(function (n) {
         if (n.id === 'root' || !n.parent) return;
         var from = M.node(d, n.parent);
@@ -506,17 +524,20 @@
       applyTransform();
     }
 
-    // Pan just enough to show a world point, after an idea is added.
-    function reveal(x, y, animated) {
+    // Pan just enough to show a world point, after an idea is added. An
+    // optional `bottom` (canvas pixels) tightens the limit, for keeping the
+    // inline editor above the on-screen keyboard.
+    function reveal(x, y, animated, bottom) {
       var sx = x * scale + tx, sy = y * scale + ty;
       var W = rootEl.clientWidth, H = rootEl.clientHeight;
       var barH = barHeight();
-      var pad = 40, top = 60 + pad, bottom = H - barH - pad;
+      var pad = 40, top = 60 + pad, bottomLimit = H - barH - pad;
+      if (typeof bottom === 'number' && bottom < bottomLimit) bottomLimit = bottom;
       var dx = 0, dy = 0;
       if (sx < pad) dx = pad - sx;
       if (sx > W - pad) dx = (W - pad) - sx;
       if (sy < top) dy = top - sy;
-      if (sy > bottom) dy = bottom - sy;
+      if (sy > bottomLimit) dy = bottomLimit - sy;
       if (dx || dy) {
         glide(animated);
         tx += dx; ty += dy;
@@ -530,6 +551,11 @@
     var lastTap = { id: null, at: 0 };
 
     rootEl.addEventListener('pointerdown', function (e) {
+      // A press inside the editor is selecting or moving the caret there.
+      if (editing && e.target.closest && e.target.closest('.is-editing')) return;
+      // A press anywhere else ends the edit, committing what was typed; the
+      // press itself (on an idea, the paper, a bar) then does its own thing.
+      if (editing) finishEdit(true, false);
       // The bars and the idea menu float over the paper; a press on them is
       // not a tap on it (one used to clear the selection before an action
       // could act).
@@ -790,33 +816,305 @@
       return handle;
     }
 
+    // ── The inline editor (#14) ──────────────────────────────────────────
+    // An idea is edited where it sits: its button is swapped for the same
+    // shape made contenteditable, and kept in `els`, so the map measures the
+    // editor as it grows and the branches follow. A new idea opens empty,
+    // with a faint placeholder, and is only created on commit — the model
+    // never sees empty text. One edit at a time.
+    var editing = null; // { el, id | null, parentId, x, y, oldText, parentWidth, max, countEl, button }
+    var coarse = root.matchMedia && root.matchMedia('(pointer: coarse)').matches;
+
+    // What the edit says so far: carriage returns gone, runs of newlines
+    // collapsed to one, trimmed.
+    function editorText(elm) {
+      var t = elm.innerText;
+      t = t.replace(/\r/g, '');
+      t = t.replace(/\n{2,}/g, '\n');
+      return t.trim();
+    }
+
     function openAdd() {
       if (M.ideaCount(d) >= M.MAX_NODES) return;
       var parent = selNode() || M.node(d, 'root');
       if (!M.canAddUnder(d, parent.id)) return;
-      sheetForm('Idea', 'e.g. Book a table', '', 'Add idea', M.MAX_TEXT, function (text) {
-        // The parent's measured width, so the new idea clears its text.
-        var n = M.addIdea(d, parent.id, text, widthOf(parent));
-        if (!n) return;
-        render();
-        var b = els.get(n.id);
-        if (b && !reducedMotion) b.classList.add('idea-in');
-        select(parent.id); // the idea you added to stays selected
-        reveal(n.x, n.y, true);
-        commit();
-      });
+      // A phone held sideways has no room to type in; the sheet still works.
+      if (rootEl.clientHeight < 420) { openAddSheet(parent.id); return; }
+      openEditor({ parentId: parent.id });
     }
 
     function openRename(id) {
       var n = M.node(d, id || selectedId);
       if (!n) return;
-      sheetForm('Idea', 'e.g. Book a table', n.text, 'Save', n.id === 'root' ? M.MAX_ROOT_TEXT : M.MAX_TEXT, function (text) {
-        M.rename(d, n.id, text);
+      if (rootEl.clientHeight < 420) { openRenameSheet(n); return; }
+      openEditor({ id: n.id });
+    }
+
+    // The sheet versions, kept for the short-canvas fallback (and the sheets
+    // still name links). The rename sheet goes through the same
+    // rename-with-Undo path as the inline editor.
+    function openAddSheet(parentId) {
+      var parent = M.node(d, parentId);
+      if (!parent) return;
+      sheetForm('Idea', 'e.g. Book a table', '', 'Add idea', M.MAX_TEXT, function (text) {
+        // The parent's measured width, so the new idea clears its text.
+        var n = M.addIdea(d, parentId, text, widthOf(parent));
+        if (!n) return;
+        render();
         var b = els.get(n.id);
-        if (b) b.textContent = text;
-        labelLinks(); // their screen-reader names say which ideas they join
+        if (b && !reducedMotion) b.classList.add('idea-in');
+        select(parentId); // the idea you added to stays selected
+        reveal(n.x, n.y, true);
         commit();
       });
+    }
+
+    function openRenameSheet(n) {
+      var id = n.id, before = n.text;
+      sheetForm('Idea', 'e.g. Book a table', n.text, 'Save', id === 'root' ? M.MAX_ROOT_TEXT : M.MAX_TEXT, function (text) {
+        applyRename(id, text, before);
+      });
+    }
+
+    // A rename that changed something: save it, and offer Undo in one step.
+    function applyRename(id, text, before) {
+      if (text === before || !M.rename(d, id, text)) return;
+      var b = els.get(id);
+      if (b) {
+        b.textContent = text;
+        b.setAttribute('aria-label', ideaLabel(M.node(d, id)));
+      }
+      labelLinks(); // their screen-reader names say which ideas they join
+      commit();
+      un.toast('Renamed to ' + text.replace(/\n/g, ' '), {
+        priority: true,
+        action: {
+          label: 'Undo',
+          handler: function () {
+            if (!M.node(d, id)) return;
+            M.rename(d, id, before);
+            var bb = els.get(id);
+            if (bb) {
+              bb.textContent = before;
+              bb.setAttribute('aria-label', ideaLabel(M.node(d, id)));
+            }
+            labelLinks();
+            commit();
+          },
+        },
+      });
+    }
+
+    // Open the inline editor: over an existing idea (o.id), or over a
+    // placeholder where the next idea under o.parentId would go. The idea is
+    // only created when the edit commits with words in it.
+    function openEditor(o) {
+      if (editing) finishEdit(true, false); // one edit at a time
+      closeMenu(); // glide() moves the menu with the map; a popover here would break it
+      var isRename = !!o.id;
+      var n = isRename ? M.node(d, o.id) : null;
+      if (isRename && !n) return;
+      var parentId = isRename ? n.parent : o.parentId;
+      var parentNode = M.node(d, parentId);
+      if (!isRename && (!parentNode || !M.canAddUnder(d, parentId) ||
+          M.ideaCount(d) >= M.MAX_NODES)) return;
+      var max = isRename && n.id === 'root' ? M.MAX_ROOT_TEXT : M.MAX_TEXT;
+      var ed = el('div', 'idea is-editing');
+      ed.setAttribute('contenteditable', 'plaintext-only');
+      if (!ed.isContentEditable) ed.setAttribute('contenteditable', 'true'); // Firefox
+      ed.setAttribute('role', 'textbox');
+      ed.setAttribute('aria-multiline', 'true');
+      ed.setAttribute('enterkeyhint', 'done');
+      ed.setAttribute('spellcheck', 'false');
+      var x, y, parentWidth, button = null;
+      if (isRename) {
+        button = els.get(n.id);
+        if (!button) return;
+        // The button's own look, without the selection ring.
+        Array.prototype.slice.call(button.classList).forEach(function (c) {
+          if (c !== 'idea' && c.indexOf('is-') !== 0) ed.classList.add(c);
+        });
+        x = n.x; y = n.y;
+        ed.textContent = n.text;
+        ed.setAttribute('aria-label', 'Editing ' + n.text);
+        button.parentNode.replaceChild(ed, button);
+        els.set(n.id, ed); // the map measures the editor where the button was
+      } else {
+        parentWidth = widthOf(parentNode);
+        var p = M.placeIdea(d, parentId, parentWidth);
+        if (!p) return;
+        x = p.x; y = p.y;
+        var pd = M.depth(d, parentId);
+        if (pd === 0) { // a main idea under the centre
+          ed.classList.add('idea-main');
+          ed.classList.add(COLOR_CLASSES[p.color == null ? 0 : p.color]);
+        } else {
+          ed.classList.add('idea-sub');
+          var bc = M.branchColor(d, parentId);
+          ed.classList.add(COLOR_CLASSES[bc == null ? 0 : bc]);
+          if (p.x < parentNode.x) ed.classList.add('left');
+        }
+        ed.dataset.placeholder = 'New idea';
+        ed.setAttribute('aria-label', 'Editing new idea under ' + parentNode.text);
+        els.set('__draft', ed);
+      }
+      ed.style.left = x + 'px';
+      ed.style.top = y + 'px';
+      world.appendChild(ed);
+      var countEl = el('span', 'edit-count');
+      countEl.setAttribute('aria-hidden', 'true');
+      world.appendChild(countEl);
+      editing = {
+        el: ed, id: isRename ? n.id : null, parentId: parentId, x: x, y: y,
+        oldText: isRename ? n.text : '', parentWidth: parentWidth, max: max,
+        countEl: countEl, button: button,
+      };
+      // The editor's own keys: Enter commits, Escape cancels, Shift+Enter is
+      // a line break. Everything else (arrows, undo, IME) is the browser's.
+      ed.addEventListener('keydown', function (e) {
+        e.stopPropagation(); // the canvas shortcuts wait until the edit is done
+        if (e.isComposing) return; // an IME mid-composition owns its keys
+        if (e.key === 'Enter' && !e.shiftKey) { finishEdit(true, true); e.preventDefault(); }
+        else if (e.key === 'Escape') { finishEdit(false, true); e.preventDefault(); }
+        else if (e.key === 'Enter' && e.shiftKey) {
+          document.execCommand('insertText', false, '\n');
+          e.preventDefault();
+        }
+      });
+      // Pasted words arrive as plain text only, capped at what is left.
+      ed.addEventListener('paste', function (e) {
+        e.preventDefault();
+        var sel = root.getSelection();
+        if (sel && sel.rangeCount && ed.contains(sel.anchorNode) && !sel.isCollapsed) {
+          sel.deleteFromDocument();
+        }
+        var t = (e.clipboardData && e.clipboardData.getData('text/plain')) || '';
+        var room = editing && editing.el === ed ? editing.max - editorText(ed).length : 0;
+        if (room > 0) document.execCommand('insertText', false, t.slice(0, room));
+      });
+      ed.addEventListener('input', function () {
+        // A cleared edit can leave a stray <br>, which would hide the
+        // placeholder; make it truly empty then.
+        if (!ed.textContent && ed.childNodes.length) ed.textContent = '';
+        clampText();
+        drawBranchesSoon(); // the branches follow the editor's width
+        updateCount();
+        revealEditor();
+      });
+      ed.addEventListener('blur', function () { finishEdit(true, false); });
+      ed.focus();
+      // All of it selected, so typing replaces the old name.
+      var sel = root.getSelection();
+      if (sel) {
+        var r = document.createRange();
+        r.selectNodeContents(ed);
+        sel.removeAllRanges();
+        sel.addRange(r);
+      }
+      updateCount();
+      revealEditor();
+    }
+
+    // Keep the edit inside its limit on any way in (a drop, autocorrect):
+    // cut the overflow off the end.
+    function clampText() {
+      if (!editing) return;
+      var ed = editing.el;
+      var over = editorText(ed).length - editing.max;
+      if (over <= 0) return;
+      var walk = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT);
+      var list = [], tn;
+      while ((tn = walk.nextNode())) list.push(tn);
+      for (var i = list.length - 1; i >= 0 && over > 0; i--) {
+        var v = list[i].nodeValue;
+        if (v.length <= over) { over -= v.length; list[i].nodeValue = ''; }
+        else { list[i].nodeValue = v.slice(0, v.length - over); over = 0; }
+      }
+      if (!editorText(ed)) ed.textContent = '';
+    }
+
+    // The editor's drawn box in world coordinates: it sits in `els` under the
+    // idea's id, or '__draft' while the idea is still being typed.
+    function editorBox() {
+      if (!editing) return null;
+      return boxOf({ id: editing.id || '__draft', x: editing.x, y: editing.y, parent: editing.parentId });
+    }
+
+    // The characters-left count, shown only near the limit.
+    function updateCount() {
+      if (!editing) return;
+      var left = editing.max - editorText(editing.el).length;
+      var c = editing.countEl;
+      if (left > 20) { c.textContent = ''; return; }
+      c.textContent = left + ' left';
+      var b = editorBox();
+      if (!b) return;
+      var pill = editing.id && M.isPill(d, editing.id);
+      c.style.left = (pill ? b.x + b.w / 2 : b.x) + 'px';
+      c.style.top = b.y + b.h + 4 + 'px';
+      c.style.transform = pill ? 'translateX(-50%)' : '';
+    }
+
+    // Pan so the editor sits above the on-screen keyboard: the visible
+    // canvas ends where the keyboard starts, read from visualViewport. On a
+    // touch screen the editor is also kept to the upper half, where typing
+    // never hides it.
+    function revealEditor() {
+      if (!editing) return;
+      var b = editorBox();
+      if (!b) return;
+      var H = rootEl.clientHeight;
+      var vv = root.visualViewport;
+      var bottom = H;
+      if (vv) {
+        var rect = rootEl.getBoundingClientRect();
+        bottom = vv.offsetTop + vv.height - rect.top;
+      }
+      if (coarse) bottom = Math.min(bottom, H * 0.45);
+      bottom -= 16;
+      // Both ends of the editor, so growth to either side stays seen.
+      reveal(b.x, b.y, false, bottom);
+      reveal(b.x + b.w, b.y + b.h, false, bottom);
+    }
+
+    // Leave the editor. commitIt saves the words (an empty edit on a new idea
+    // just goes away; on an existing one the old text was never touched, so
+    // there is nothing to restore); refocus hands the keyboard's focus back
+    // to the idea's button.
+    function finishEdit(commitIt, refocus) {
+      if (!editing) return;
+      var ed = editing;
+      editing = null; // first: blur and the viewport can both re-enter
+      if (ed.countEl.parentNode) ed.countEl.parentNode.removeChild(ed.countEl);
+      var text = editorText(ed.el).slice(0, ed.max);
+      if (ed.id) {
+        var btn = ed.button;
+        if (ed.el.parentNode) ed.el.parentNode.replaceChild(btn, ed.el);
+        els.set(ed.id, btn);
+        if (commitIt && text) applyRename(ed.id, text, ed.oldText);
+        else drawBranchesSoon();
+        if (refocus) btn.focus();
+      } else {
+        if (ed.el.parentNode) ed.el.parentNode.removeChild(ed.el);
+        els.delete('__draft');
+        if (commitIt && text) {
+          var n2 = M.addIdea(d, ed.parentId, text, ed.parentWidth);
+          if (n2) {
+            render();
+            var b = els.get(n2.id);
+            if (b && !reducedMotion) b.classList.add('idea-in');
+            select(ed.parentId); // the idea it grew from stays selected
+            reveal(n2.x, n2.y, false);
+            commit();
+          }
+        } else {
+          drawBranchesSoon(); // the draft branch goes away
+        }
+        if (refocus) {
+          var pb = els.get(ed.parentId);
+          if (pb) pb.focus();
+        }
+      }
     }
 
     function openDelete() {
@@ -956,6 +1254,7 @@
     rootEl.addEventListener('keydown', function (e) {
       if (readOnly) return;
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (e.target.isContentEditable) return; // the inline editor's own keys
       // A key on a bar's or the menu's own button is that button's: Enter
       // presses it, rather than adding an idea. Escape in the menu closes it
       // and hands focus back to the idea.
@@ -994,6 +1293,12 @@
           if (focusedId !== 'root') openMenu(focusedId);
           e.preventDefault();
         } else if (selectedId) { openAdd(); e.preventDefault(); }
+      } else if (e.key === 'Tab' && !e.shiftKey && !e.altKey &&
+          (focusedId || selectedId) && !linkingFrom) {
+        // Tab adds a child and starts typing at once, like the buttons do.
+        if (focusedId && focusedId !== selectedId) select(focusedId);
+        openAdd();
+        e.preventDefault();
       } else if (e.key === 'F2') {
         closeMenu(); // the menu would cover the sheet's field
         openRename(focusedId || selectedId);
@@ -1031,13 +1336,25 @@
     // A resized window moves the idea under the menu on screen.
     var onResize = function () { placeMenu(); };
     root.addEventListener('resize', onResize);
+    // The on-screen keyboard arriving or moving: keep the edit above it.
+    var vv = root.visualViewport;
+    var onViewport = function () { if (editing) revealEditor(); };
+    if (vv) {
+      vv.addEventListener('resize', onViewport);
+      vv.addEventListener('scroll', onViewport);
+    }
 
     return {
       el: rootEl,
       setStatus: setStatus,
       fit: function () { fit(true); },
       destroy: function () {
+        if (editing) finishEdit(true, false);
         root.removeEventListener('resize', onResize);
+        if (vv) {
+          vv.removeEventListener('resize', onViewport);
+          vv.removeEventListener('scroll', onViewport);
+        }
         container.textContent = '';
       },
     };
