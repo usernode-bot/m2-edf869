@@ -158,6 +158,12 @@ Re-theme by changing the token values there, keeping every text pair at
 
 ## App-specific conventions
 
+- The automatic layout (#18) lives in `M.layout(doc, measure)` in
+  `public/js/map-model.js` — pure, shared, never re-implemented in the
+  view. `doc.layout` is optional: absent (Keep tidy off) or exactly
+  `{ auto: true }` (Keep tidy on). New maps and the example map start with
+  `{ auto: true }`; with it on, every edit path relies on `commit()` to
+  relayout — a new edit path only needs to end in `commit()`.
 - Every edit path in `public/js/canvas.js` calls `record(label)` before it
   mutates the doc, so the change can be undone and redone (the history lives
   in memory on the open view only, and read-only viewers get none). A later

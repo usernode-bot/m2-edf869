@@ -400,7 +400,7 @@ app.post('/api/maps', async (req, res) => {
       if (!title || title.length > M2Model.MAX_ROOT_TEXT) {
         return res.status(400).json({ error: 'Give the map a name of up to 80 characters' });
       }
-      doc = { v: 1, nodes: [{ id: 'root', parent: null, text: title, x: 0, y: 0 }] };
+      doc = { v: 1, nodes: [{ id: 'root', parent: null, text: title, x: 0, y: 0 }], layout: { auto: true } };
     }
     const id = await insertMap(pool, ownerId, doc, req.now);
     const row = await pool.query(`SELECT ${MAP_COLUMNS} FROM maps WHERE id = $1 AND owner_id = $2`, [id, ownerId]);
