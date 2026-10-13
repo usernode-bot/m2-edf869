@@ -782,4 +782,95 @@
       display: inline-flex;
     }
   }
+
+  /* ── Find in map (#23) ─────────────────────────────────────────────── */
+  /* A compact bar over the top bar: the field, the count, and the three
+     steps. All colours come from the tokens, so both looks carry it. */
+  .find-bar {
+    position: absolute;
+    top: 8px;
+    right: 12px;
+    z-index: 30; /* over the top bar (20), so its steps stay tappable */
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    width: min(440px, calc(100% - 24px));
+    height: 44px;
+    padding: 0 4px 0 12px;
+    background: rgb(var(--surface));
+    border: 1px solid rgb(var(--line));
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgb(var(--fg) / 0.10);
+  }
+  .find-bar[hidden] {
+    display: none;
+  }
+  .find-bar > .icon {
+    flex: none;
+    color: rgb(var(--muted));
+  }
+  .find-input {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    background: transparent;
+    font-size: 16px;
+    line-height: 24px;
+    color: rgb(var(--fg));
+    outline: none;
+  }
+  .find-input::placeholder {
+    color: rgb(var(--muted) / 0.6);
+  }
+  .find-bar:focus-within {
+    box-shadow: 0 0 0 2px rgb(var(--focus));
+  }
+  .find-count {
+    padding: 0 4px;
+    font-size: 14px;
+    line-height: 20px;
+    white-space: nowrap;
+    color: rgb(var(--muted));
+  }
+  .find-step {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    border: none;
+    background: transparent;
+    border-radius: 10px;
+    color: rgb(var(--fg));
+    cursor: pointer;
+  }
+  .find-step:hover {
+    background: rgb(var(--raised));
+  }
+  .find-step:focus-visible {
+    outline: 2px solid rgb(var(--focus));
+    outline-offset: -2px;
+  }
+  .find-step:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  /* While finding: matches ring, everything else dims. Branches and link
+     lines stay full strength so the map's shape keeps its bearings. */
+  .canvas.is-finding .idea:not(.is-match),
+  .canvas.is-finding .link-label:not(.is-match) {
+    opacity: 0.35;
+  }
+  .idea.is-match,
+  .link-label.is-match {
+    box-shadow: 0 0 0 4px rgb(var(--focus) / 0.22);
+  }
+  .idea-sub.is-match {
+    border-radius: 6px;
+  }
+  .link-label.is-current {
+    outline: 2px solid rgb(var(--focus));
+    outline-offset: 2px;
+  }
 }

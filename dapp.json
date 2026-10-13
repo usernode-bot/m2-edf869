@@ -68,6 +68,11 @@
       "name": "map.shortcuts-button",
       "path": "/?demo=1",
       "expectSelector": ".kbd-btn"
+    },
+    {
+      "name": "map.find-button",
+      "path": "/?demo=1",
+      "expectSelector": ".topbar .find-btn"
     }
   ]
 }
