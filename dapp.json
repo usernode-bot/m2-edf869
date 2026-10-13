@@ -58,6 +58,11 @@
       "name": "map.demo-shared-with-you",
       "path": "/?demo=1#/maps",
       "expectText": "Shared with you"
+    },
+    {
+      "name": "map.shortcuts-button",
+      "path": "/?demo=1",
+      "expectSelector": ".kbd-btn"
     }
   ]
 }

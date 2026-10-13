@@ -178,6 +178,11 @@ Re-theme by changing the token values there, keeping every text pair at
   never from people who happened to open the app.
 - Idea anchors are world pixels: the centre of a pill, the near end of an
   outer idea's underline. Keep placement rules in the model, not the view.
+- The keyboard rules live in two places that change together: which idea lies
+  in a direction and how a sibling is placed are model helpers
+  (`nextIdea`, `addSibling` in `map-model.js`), and which key does what is
+  the keydown handler in `canvas.js`, whose shortcuts sheet lists the same
+  table (`SHORTCUTS`) the sheet renders — update both when a key changes.
 - Maps nest 10 levels deep (`MAX_DEPTH`; the central idea is level 0). A
   new idea is placed past the end of its parent's drawn width (measured on
   the page, estimated from the text elsewhere), so deep chains never overlap.
