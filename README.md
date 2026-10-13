@@ -27,7 +27,9 @@ finds it under "Shared with you" on Your maps.
 - `public/js/canvas.js` draws and edits one map; `public/js/maps-list.js`
   draws Your maps; `public/js/app.js` routes between them and runs the
   autosave queue (700 ms debounce, one PUT in flight, retrying after
-  2, 5 and 10 s).
+  2, 5 and 10 s). Each save names the map's `revision`; when another tab
+  or device saved first, the server answers 409 with its copy and the page
+  asks: Load the latest, Keep mine, or Save mine as a copy.
 - `public/js/share-sheet.js` is the Share sheet and its Add people sheet.
 - `server.js` keeps the API under `/api/*`: list, welcome (first visit
   makes the example map), create, open, save, delete, and sharing (who

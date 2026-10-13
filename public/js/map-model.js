@@ -162,6 +162,105 @@
     return n;
   }
 
+  // Add a sibling next to an idea, above or below, and return the new node.
+  // The ideas past it on that branch move one step (50 px) to make room.
+  // On the central idea, or a main idea, there is no "beside": the next main
+  // idea grows where addIdea() puts one, on the side with fewer of them.
+  // Returns null for a missing idea or empty text.
+  function addSibling(doc, id, text, above) {
+    var n = node(doc, id);
+    if (!n) return null;
+    if (id === 'root' || n.parent === 'root') return addIdea(doc, 'root', text);
+    var t = trim(text);
+    if (!t) return null;
+    var dy = above ? -50 : 50;
+    childrenOf(doc, n.parent).forEach(function (k) {
+      if (above ? k.y < n.y : k.y > n.y) moveSubtree(doc, k.id, 0, dy);
+    });
+    var m = { id: newId(), parent: n.parent, text: t, x: n.x, y: n.y + dy };
+    nodes(doc).splice(nodes(doc).indexOf(n) + (above ? 0 : 1), 0, m);
+    return m;
+  }
+
+  // ── Walking the map from the keyboard ──────────────────────────────────
+  // Which idea lies from another one in a direction ('left' | 'right' |
+  // 'up' | 'down'), by the anchors alone, so it needs no measuring. A
+  // branch's side decides what outwards means: on a left-side branch, the
+  // children lie to the left. Returns the idea's id; when nothing lies that
+  // way, the nearest idea that does, else the idea itself. An unknown id
+  // answers 'root', so the caller always has somewhere to be.
+
+  // Which side of its parent an idea draws on: the render rule (.left), so
+  // the keys agree with the picture. The central idea is on neither side.
+  function sideOf(doc, n) {
+    if (n.id === 'root') return 0;
+    var p = node(doc, n.parent);
+    if (!p) return 0;
+    return n.x >= p.x ? 1 : -1;
+  }
+
+  // The item whose y is nearest, ties to doc order (first wins).
+  function nearestY(list, y) {
+    var best = null, bestD = Infinity;
+    for (var i = 0; i < list.length; i++) {
+      var dist = Math.abs(list[i].y - y);
+      if (dist < bestD) { best = list[i]; bestD = dist; }
+    }
+    return best;
+  }
+
+  // Nothing on the branch lies that way: the nearest idea whose anchor does,
+  // counting the way there double. Primary is the direction's own axis.
+  function fallbackIdea(doc, n, dir) {
+    var primary = dir === 'left' || dir === 'right' ? 'x' : 'y';
+    var sign = dir === 'right' || dir === 'down' ? 1 : -1;
+    var best = null, bestScore = Infinity;
+    nodes(doc).forEach(function (o) {
+      if (o.id === n.id) return;
+      var delta = (o[primary] - n[primary]) * sign;
+      if (delta <= 0) return;
+      var cross = primary === 'x' ? Math.abs(o.y - n.y) : Math.abs(o.x - n.x);
+      var score = delta + 2 * cross;
+      if (score < bestScore) { best = o; bestScore = score; }
+    });
+    return best ? best.id : n.id;
+  }
+
+  function nextIdea(doc, id, dir) {
+    var n = node(doc, id);
+    if (!n) return 'root';
+    var toward = dir === 'right' ? 1 : dir === 'left' ? -1 : 0;
+    if (toward) {
+      var side = sideOf(doc, n);
+      if (n.id === 'root') {
+        var first = nearestY(childrenOf(doc, 'root').filter(function (k) {
+          return sideOf(doc, k) === toward;
+        }), 0);
+        return first ? first.id : fallbackIdea(doc, n, dir);
+      }
+      if (side === toward) {
+        var kids = childrenOf(doc, n.id);
+        var child = kids.length ? nearestY(kids, n.y) : null;
+        return child ? child.id : fallbackIdea(doc, n, dir);
+      }
+      if (side === -toward) return n.parent;
+      return fallbackIdea(doc, n, dir);
+    }
+    // Up or down: the sibling above or below, among main ideas only those
+    // on the same side of the centre.
+    var sibs = childrenOf(doc, n.parent).filter(function (k) {
+      return k.id !== n.id && (n.parent !== 'root' || sideOf(doc, k) === sideOf(doc, n));
+    });
+    var want = dir === 'up' ? -1 : 1;
+    var best = null, bestD = Infinity;
+    sibs.forEach(function (k) {
+      var delta = (k.y - n.y) * want;
+      if (delta <= 0) return;
+      if (delta < bestD) { best = k; bestD = delta; }
+    });
+    return best ? best.id : fallbackIdea(doc, n, dir);
+  }
+
   function rename(doc, id, text) {
     var n = node(doc, id);
     var t = trim(text);
@@ -267,6 +366,24 @@
       if (list[i].id === id) return JSON.parse(JSON.stringify(list.splice(i, 1)[0]));
     }
     return null;
+  }
+
+  // The doc's nodes and links as one string, for the canvas's undo history.
+  // Links are left out when the doc has none, so a snapshot of a map without
+  // links restores a map without links.
+  function snapshot(doc) {
+    var snap = { nodes: nodes(doc) };
+    if (doc && doc.links) snap.links = doc.links;
+    return JSON.stringify(snap);
+  }
+
+  // Replace a doc's nodes and links with a snapshot's, on the same doc
+  // object, so a saver holding the reference keeps saving the same doc.
+  function replaceWith(doc, snap) {
+    var s = JSON.parse(snap);
+    doc.nodes = s.nodes;
+    if (s.links) doc.links = s.links;
+    else delete doc.links;
   }
 
   // Remove every link touching any of the ideas in `ids`; returns copies.
@@ -404,6 +521,8 @@
     canAddUnder: canAddUnder,
     addIdea: addIdea,
     placeIdea: placeIdea,
+    addSibling: addSibling,
+    nextIdea: nextIdea,
     rename: rename,
     moveSubtree: moveSubtree,
     removeSubtree: removeSubtree,
@@ -417,6 +536,8 @@
     removeLink: removeLink,
     removeLinksFor: removeLinksFor,
     restoreLinks: restoreLinks,
+    snapshot: snapshot,
+    replaceWith: replaceWith,
     validate: validate,
   };
 });

@@ -157,6 +157,11 @@ Re-theme by changing the token values there, keeping every text pair at
 
 ## App-specific conventions
 
+- Every edit path in `public/js/canvas.js` calls `record(label)` before it
+  mutates the doc, so the change can be undone and redone (the history lives
+  in memory on the open view only, and read-only viewers get none). A later
+  feature that changes a map — recolour, reparent, collapse — follows the
+  same rule: record first, then mutate.
 - A map is one JSONB document (`{ v: 1, nodes: [...] }`), validated by
   `public/js/map-model.js` on both sides — the page and `server.js`
   require the same file, so never fork the validation.
@@ -178,6 +183,11 @@ Re-theme by changing the token values there, keeping every text pair at
   never from people who happened to open the app.
 - Idea anchors are world pixels: the centre of a pill, the near end of an
   outer idea's underline. Keep placement rules in the model, not the view.
+- The keyboard rules live in two places that change together: which idea lies
+  in a direction and how a sibling is placed are model helpers
+  (`nextIdea`, `addSibling` in `map-model.js`), and which key does what is
+  the keydown handler in `canvas.js`, whose shortcuts sheet lists the same
+  table (`SHORTCUTS`) the sheet renders — update both when a key changes.
 - Maps nest 10 levels deep (`MAX_DEPTH`; the central idea is level 0). A
   new idea is placed past the end of its parent's drawn width (measured on
   the page, estimated from the text elsewhere), so deep chains never overlap.
@@ -188,4 +198,10 @@ Re-theme by changing the token values there, keeping every text pair at
   so they never pass for a branch, and go with either idea when it is
   deleted (`removeSubtree` carries them for Undo). At most 200 a map, names
   up to 60 characters.
+- `maps.revision` goes up by one on every save. `PUT /api/maps/:id` takes
+  `baseRevision` and writes only when it still matches; otherwise it answers
+  409 `{ error: 'conflict', revision, doc }` and `app.js` shows the conflict
+  sheet. A save without `baseRevision` (a tab opened before revisions
+  existed) still writes, last save wins; drop that path once old tabs are
+  gone. Any new write route that changes `doc` must bump `revision` too.
 - Avoid adding new dependencies; express, pg and jsonwebtoken cover it.

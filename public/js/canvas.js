@@ -22,7 +22,37 @@
     plus: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
     share: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg>',
     link: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5"/></svg>',
+    keyboard: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01"/><path d="M10 10h.01"/><path d="M14 10h.01"/><path d="M18 10h.01"/><path d="M7 14h10"/></svg>',
+    undo: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>',
+    redo: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>',
   };
+
+  // The keyboard shortcuts (#15), one table the sheet is drawn from, so the
+  // words and the behaviour stay together. 'Mod' reads Cmd on a Mac and Ctrl
+  // elsewhere (both are accepted everywhere); 'Alt' reads Option on a Mac.
+  // Rows marked edit:true need an owned map, so a read-only view leaves them
+  // out, and a group with nothing left drops away with them.
+  var IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  var SHORTCUTS = [
+    { group: 'Add and change ideas', rows: [
+      { keys: ['Tab'], text: 'Add an idea under the selected one', edit: true },
+      { keys: ['Enter'], text: 'Add the next idea beside the one just added', edit: true },
+      { keys: ['Shift', 'Enter'], text: 'Add the next idea above it instead', edit: true },
+      { keys: ['Space', 'or', 'F2'], text: 'Rename the selected idea', edit: true },
+      { keys: ['Delete', 'or', 'Backspace'], text: 'Delete the selected idea', edit: true },
+    ] },
+    { group: 'Move around', rows: [
+      { keys: ['Arrows'], text: 'Move to the idea in that direction' },
+      { keys: ['Alt', 'Arrows'], text: 'Nudge the selected idea across the paper', edit: true },
+      { keys: ['Esc'], text: 'Close a menu or sheet, or clear the selection' },
+    ] },
+    { group: 'View', rows: [
+      { keys: ['Mod', '0'], text: 'Fit the map to the screen' },
+      { keys: ['Mod', '+'], text: 'Zoom in' },
+      { keys: ['Mod', '-'], text: 'Zoom out' },
+      { keys: ['?'], text: 'Open this sheet' },
+    ] },
+  ];
 
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -113,8 +143,16 @@
     var els = new Map(); // node id -> button
     var linkEls = new Map(); // link id -> label button
 
+    // Undo and redo: snapshots of the doc before each edit, in memory only,
+    // so the history dies with the view and no other map ever sees it.
+    var undoStack = [], redoStack = [], HISTORY_MAX = 100;
+    var lastNudge = { id: null, at: 0 }; // rapid arrow-key moves of one idea
+    var deleteToast = null; // an open delete toast, dismissed by the next edit
+    var undoBtn = null, redoBtn = null;
+
     // The world, back to front: branches and link lines, link labels, ideas.
     var rootEl = el('div', 'canvas');
+    rootEl.tabIndex = -1; // focusable, so keys work before any click
     var world = el('div', 'world');
     var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('class', 'branches');
@@ -128,8 +166,9 @@
     if (opts.onOpenMaps) {
       var mapsBtn = el('button', 'btn-secondary');
       mapsBtn.type = 'button';
+      mapsBtn.setAttribute('aria-label', 'Maps');
       mapsBtn.appendChild(icon('grid'));
-      mapsBtn.appendChild(document.createTextNode('Maps'));
+      mapsBtn.appendChild(el('span', 'btn-label', 'Maps'));
       mapsBtn.addEventListener('click', opts.onOpenMaps);
       topbar.appendChild(mapsBtn);
     }
@@ -143,6 +182,22 @@
     var statusEl = el('span', 'save-status');
     statusEl.hidden = true;
     topRight.appendChild(statusEl);
+    if (!readOnly) {
+      var historyEl = el('div', 'history');
+      undoBtn = el('button', 'btn-secondary btn-icon undo-btn');
+      undoBtn.type = 'button';
+      undoBtn.appendChild(icon('undo'));
+      undoBtn.disabled = true;
+      undoBtn.addEventListener('click', undo);
+      historyEl.appendChild(undoBtn);
+      redoBtn = el('button', 'btn-secondary btn-icon redo-btn');
+      redoBtn.type = 'button';
+      redoBtn.appendChild(icon('redo'));
+      redoBtn.disabled = true;
+      redoBtn.addEventListener('click', redo);
+      historyEl.appendChild(redoBtn);
+      topRight.appendChild(historyEl);
+    }
     if (opts.onShare) {
       var shareBtn = el('button', 'btn-secondary');
       shareBtn.type = 'button';
@@ -152,6 +207,15 @@
       shareBtn.addEventListener('click', opts.onShare);
       topRight.appendChild(shareBtn);
     }
+    // The keyboard shortcuts sheet, one tap away on a wide screen. On a
+    // phone the ? key still opens it from a hardware keyboard.
+    var kbdBtn = el('button', 'btn-secondary btn-icon kbd-btn');
+    kbdBtn.type = 'button';
+    kbdBtn.setAttribute('aria-label', 'Keyboard shortcuts');
+    kbdBtn.title = 'Keyboard shortcuts';
+    kbdBtn.appendChild(icon('keyboard'));
+    kbdBtn.addEventListener('click', function () { openShortcuts(); });
+    topRight.appendChild(kbdBtn);
     var fitBtn = el('button', 'btn-secondary btn-icon');
     fitBtn.type = 'button';
     fitBtn.setAttribute('aria-label', 'Fit map to screen');
@@ -220,10 +284,11 @@
 
     function setStatus(kind) {
       statusEl.hidden = readOnly || kind === 'none';
-      statusEl.classList.toggle('is-error', kind === 'error');
+      statusEl.classList.toggle('is-error', kind === 'error' || kind === 'conflict');
       if (kind === 'saving') { statusEl.textContent = 'Saving'; }
       else if (kind === 'saved') { statusEl.textContent = ''; statusEl.appendChild(icon('check')); statusEl.appendChild(document.createTextNode('Saved')); }
       else if (kind === 'error') { statusEl.textContent = 'Not saved'; }
+      else if (kind === 'conflict') { statusEl.textContent = 'Changed elsewhere'; }
       else if (kind === 'guest') { statusEl.textContent = 'Sign in to save'; }
       else { statusEl.textContent = ''; }
     }
@@ -266,6 +331,67 @@
       drawBranches();
       renderBar();
       opts.onChange();
+    }
+
+    // ── Undo and redo ────────────────────────────────────────────────────
+    // Every edit calls record(label) just before it mutates the doc, so the
+    // doc state before it is on the undo stack. A snapshot holds both the
+    // ideas and the links, so deleting an idea brings its links back too.
+    // A pending edit that turns out to change nothing pops its entry with
+    // unrecord(), only while it is still on top.
+
+    function record(label) {
+      var entry = { label: label, snap: M.snapshot(d) };
+      undoStack.push(entry);
+      if (undoStack.length > HISTORY_MAX) undoStack.shift();
+      redoStack.length = 0;
+      lastNudge = { id: null, at: 0 };
+      if (deleteToast && deleteToast.dismiss) deleteToast.dismiss();
+      deleteToast = null;
+      renderHistory();
+      return entry;
+    }
+
+    function unrecord(entry) {
+      if (undoStack.length && undoStack[undoStack.length - 1] === entry) {
+        undoStack.pop();
+        renderHistory();
+      }
+    }
+
+    function undo() {
+      if (!undoStack.length || gesture) return;
+      step(undoStack, redoStack);
+    }
+
+    function redo() {
+      if (!redoStack.length || gesture) return;
+      step(redoStack, undoStack);
+    }
+
+    function step(from, to) {
+      cancelLink(); // a Join waiting for its second idea stops first
+      var entry = from.pop();
+      to.push({ label: entry.label, snap: M.snapshot(d) });
+      M.replaceWith(d, entry.snap);
+      if (selectedId && !M.node(d, selectedId)) selectedId = null;
+      render();
+      select(selectedId);
+      commit();
+      lastNudge = { id: null, at: 0 };
+      renderHistory();
+    }
+
+    function renderHistory() {
+      if (!undoBtn) return;
+      var u = undoStack[undoStack.length - 1];
+      var r = redoStack[redoStack.length - 1];
+      undoBtn.disabled = !u;
+      redoBtn.disabled = !r;
+      undoBtn.title = u ? 'Undo ' + u.label : 'Undo';
+      undoBtn.setAttribute('aria-label', undoBtn.title);
+      redoBtn.title = r ? 'Redo ' + r.label : 'Redo';
+      redoBtn.setAttribute('aria-label', redoBtn.title);
     }
 
     // ── Rendering ────────────────────────────────────────────────────────
@@ -524,25 +650,58 @@
       applyTransform();
     }
 
-    // Pan just enough to show a world point, after an idea is added. An
-    // optional `bottom` (canvas pixels) tightens the limit, for keeping the
+    // Pan just enough to show a world point — or a box around one, when the
+    // caller passes the idea's drawn w and h, so the whole pill or underline
+    // clears the bars and the edges. A box wider or taller than the space
+    // pins to its left (top) edge: one edge has to win. An optional
+    // `kbBottom` (canvas pixels) tightens the bottom limit, for keeping the
     // inline editor above the on-screen keyboard.
-    function reveal(x, y, animated, bottom) {
+    function reveal(x, y, animated, w, h, kbBottom) {
       var sx = x * scale + tx, sy = y * scale + ty;
       var W = rootEl.clientWidth, H = rootEl.clientHeight;
       var barH = barHeight();
-      var pad = 40, top = 60 + pad, bottomLimit = H - barH - pad;
-      if (typeof bottom === 'number' && bottom < bottomLimit) bottomLimit = bottom;
+      var pad = 40, top = 60 + pad, bottom = H - barH - pad;
+      if (typeof kbBottom === 'number' && kbBottom < bottom) bottom = kbBottom;
+      var halfW = w ? w * scale / 2 : 0, halfH = h ? h * scale / 2 : 0;
       var dx = 0, dy = 0;
-      if (sx < pad) dx = pad - sx;
-      if (sx > W - pad) dx = (W - pad) - sx;
-      if (sy < top) dy = top - sy;
-      if (sy > bottomLimit) dy = bottomLimit - sy;
+      if (sx - halfW < pad) dx = pad - (sx - halfW);
+      else if (sx + halfW > W - pad) dx = (W - pad) - (sx + halfW);
+      if (sy - halfH < top) dy = top - (sy - halfH);
+      else if (sy + halfH > bottom) dy = bottom - (sy + halfH);
       if (dx || dy) {
         glide(animated);
         tx += dx; ty += dy;
         applyTransform();
       }
+    }
+
+    // Pan so the whole idea named is on the paper, not just its anchor.
+    function revealIdea(id, animated) {
+      var n = M.node(d, id);
+      var box = n && boxOf(n);
+      if (!n) return;
+      reveal(n.x, n.y, animated, box ? box.w : 0, box ? box.h : 0);
+    }
+
+    // Keyboard focus on an idea, or back on the paper when there is none.
+    // preventScroll: reveal() pans by the view's own rules instead.
+    function focusIdea(id) {
+      var b = id && els.get(id);
+      if (b) b.focus({ preventScroll: true });
+      else rootEl.focus({ preventScroll: true });
+    }
+
+    // One zoom step around the middle of the space between the bars, kept
+    // inside the same 0.3–2 clamp the pinch and wheel use.
+    function zoomBy(f) {
+      var W = rootEl.clientWidth, H = rootEl.clientHeight;
+      var px = W / 2, py = (60 + H - barHeight()) / 2;
+      var wx = (px - tx) / scale, wy = (py - ty) / scale;
+      scale = Math.min(2, Math.max(0.3, scale * f));
+      tx = px - wx * scale;
+      ty = py - wy * scale;
+      closeMenu(); // the menu's idea slides under it at the new zoom
+      applyTransform();
     }
 
     // ── Gestures ─────────────────────────────────────────────────────────
@@ -622,6 +781,7 @@
           gesture.moved = true;
           gesture.kind = 'drag';
           closeMenu(); // dragging the idea closes its menu
+          record('move idea'); // the whole drag is one undo step
         }
         var wdx = (e.clientX - (gesture.lastX == null ? gesture.x : gesture.lastX)) / scale;
         var wdy = (e.clientY - (gesture.lastY == null ? gesture.y : gesture.lastY)) / scale;
@@ -794,6 +954,7 @@
       }
       form.appendChild(label);
       form.appendChild(input);
+      if (options.hint) form.appendChild(el('p', 'text-small text-muted', options.hint));
       form.appendChild(btn);
       if (options.extra) {
         var extra = el('button', 'btn-secondary', options.extra.label);
@@ -804,14 +965,42 @@
         });
         form.appendChild(extra);
       }
+      // Escape closes a sheet from the field too, and in the add chain an
+      // empty Enter stops it (the submit button is disabled then, so no
+      // submit event would carry it).
+      form.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') {
+          e.stopPropagation();
+          handle.dismiss();
+        } else if (e.key === 'Enter' && options.keepOpen && !input.value.trim()) {
+          e.preventDefault();
+          handle.dismiss();
+        }
+      });
       form.addEventListener('submit', function (e) {
         e.preventDefault();
         var v = input.value.trim();
         if (!v && !options.allowEmpty) return;
-        handle.dismiss();
-        onSubmit(v);
+        if (options.keepOpen) {
+          // The chain: onSubmit adds one idea and keeps the sheet open; it
+          // may answer false to leave the field as it is when nothing was
+          // added.
+          if (onSubmit(v) === false) return;
+          input.value = '';
+          btn.disabled = true;
+          input.focus();
+        } else {
+          handle.dismiss();
+          onSubmit(v);
+        }
       });
-      var handle = un.presentSheet({ contentEl: form });
+      var handle = un.presentSheet({
+        contentEl: form,
+        onDismiss: function () {
+          if (options.onDismiss) options.onDismiss();
+          focusIdea(selectedId); // back to the idea the sheet was about
+        },
+      });
       setTimeout(function () { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }, 60);
       return handle;
     }
@@ -843,6 +1032,55 @@
       openEditor({ parentId: parent.id });
     }
 
+    // Tab and Enter open the add sheet as a chain: it stays open, each Enter
+    // adds the typed idea and starts the next field, and the last idea added
+    // becomes where the next one grows from. Esc, or Enter on an empty
+    // field, stops it. `where` is 'child' (Tab: under the selected idea) or
+    // 'below'/'above' (Enter/Shift+Enter: beside it); on the central or a
+    // main idea there is no beside, so a new main idea grows either way.
+    function openAddChain(where) {
+      var anchor = selNode() || M.node(d, 'root');
+      if (!anchor) return;
+      if (M.ideaCount(d) >= M.MAX_NODES) {
+        un.toast('This map is full (500 ideas)');
+        return;
+      }
+      var kind = where; // 'child' only for the first idea; then siblings
+      var mode = where === 'child' ? 'below' : where; // 'below' | 'above'
+      if (kind === 'child' && !M.canAddUnder(d, anchor.id)) {
+        un.toast('Ideas go ' + M.MAX_DEPTH + ' levels deep');
+        return;
+      }
+      sheetForm('Idea', 'e.g. Book a table', '', 'Add idea', M.MAX_TEXT, function (text) {
+        if (M.ideaCount(d) >= M.MAX_NODES) {
+          un.toast('This map is full (500 ideas)');
+          return false;
+        }
+        if (kind === 'child' && !M.canAddUnder(d, anchor.id)) {
+          un.toast('Ideas go ' + M.MAX_DEPTH + ' levels deep');
+          return false;
+        }
+        var n = kind === 'child'
+          ? M.addIdea(d, anchor.id, text, widthOf(anchor))
+          : M.addSibling(d, anchor.id, text, mode === 'above');
+        if (!n) return false;
+        kind = 'sibling'; // the chain runs beside the idea just added
+        mode = 'below';
+        anchor = n;
+        render();
+        var b = els.get(n.id);
+        if (b && !reducedMotion) b.classList.add('idea-in');
+        select(n.id);
+        focusIdea(n.id);
+        revealIdea(n.id, true);
+        commit();
+        return true;
+      }, {
+        keepOpen: true,
+        hint: 'Enter adds it and starts the next one. Esc stops.',
+      });
+    }
+
     function openRename(id) {
       var n = M.node(d, id || selectedId);
       if (!n) return;
@@ -850,21 +1088,20 @@
       openEditor({ id: n.id });
     }
 
-    // The sheet versions, kept for the short-canvas fallback (and the sheets
-    // still name links). The rename sheet goes through the same
-    // rename-with-Undo path as the inline editor.
+    // The sheet version of adding, kept for the short-canvas fallback.
     function openAddSheet(parentId) {
       var parent = M.node(d, parentId);
       if (!parent) return;
       sheetForm('Idea', 'e.g. Book a table', '', 'Add idea', M.MAX_TEXT, function (text) {
+        var entry = record('add idea');
         // The parent's measured width, so the new idea clears its text.
         var n = M.addIdea(d, parentId, text, widthOf(parent));
-        if (!n) return;
+        if (!n) { unrecord(entry); return; }
         render();
         var b = els.get(n.id);
         if (b && !reducedMotion) b.classList.add('idea-in');
         select(parentId); // the idea you added to stays selected
-        reveal(n.x, n.y, true);
+        revealIdea(n.id, true);
         commit();
       });
     }
@@ -878,7 +1115,9 @@
 
     // A rename that changed something: save it, and offer Undo in one step.
     function applyRename(id, text, before) {
-      if (text === before || !M.rename(d, id, text)) return;
+      if (text === before || !M.node(d, id)) return; // the same text is no edit
+      var entry = record('rename idea');
+      if (!M.rename(d, id, text)) { unrecord(entry); return; }
       var b = els.get(id);
       if (b) {
         b.textContent = text;
@@ -892,6 +1131,7 @@
           label: 'Undo',
           handler: function () {
             if (!M.node(d, id)) return;
+            record('rename idea');
             M.rename(d, id, before);
             var bb = els.get(id);
             if (bb) {
@@ -1073,8 +1313,8 @@
       if (coarse) bottom = Math.min(bottom, H * 0.45);
       bottom -= 16;
       // Both ends of the editor, so growth to either side stays seen.
-      reveal(b.x, b.y, false, bottom);
-      reveal(b.x + b.w, b.y + b.h, false, bottom);
+      reveal(b.x, b.y, false, 0, 0, bottom);
+      reveal(b.x + b.w, b.y + b.h, false, 0, 0, bottom);
     }
 
     // Leave the editor. commitIt saves the words (an empty edit on a new idea
@@ -1098,14 +1338,17 @@
         if (ed.el.parentNode) ed.el.parentNode.removeChild(ed.el);
         els.delete('__draft');
         if (commitIt && text) {
+          var entry = record('add idea');
           var n2 = M.addIdea(d, ed.parentId, text, ed.parentWidth);
           if (n2) {
             render();
             var b = els.get(n2.id);
             if (b && !reducedMotion) b.classList.add('idea-in');
             select(ed.parentId); // the idea it grew from stays selected
-            reveal(n2.x, n2.y, false);
+            revealIdea(n2.id, false);
             commit();
+          } else {
+            unrecord(entry);
           }
         } else {
           drawBranchesSoon(); // the draft branch goes away
@@ -1148,21 +1391,28 @@
 
     function deleteIdea(id) {
       if (!M.node(d, id)) return;
+      var parentId = M.node(d, id).parent;
+      var entry = record('delete idea');
       var removed = M.removeSubtree(d, id);
       var under = removed.length - 1;
       var text = removed[0].text;
-      select(null);
+      select(parentId || null); // what the idea grew from takes over
       render();
       commit();
+      setTimeout(function () { focusIdea(parentId || null); }, 0);
       var message = 'Deleted ' + text + (under > 0 ? ' and ' + under + ' idea' + (under === 1 ? '' : 's') + ' under it' : '');
-      un.toast(message, {
+      deleteToast = un.toast(message, {
         priority: true,
         action: {
           label: 'Undo',
           handler: function () {
-            M.restore(d, removed);
-            render();
-            commit();
+            // Only while the delete is still the last edit, so the toast can
+            // never undo something newer than the delete it names.
+            if (undoStack[undoStack.length - 1] === entry) {
+              undo();
+              select(id);
+              setTimeout(function () { focusIdea(id); }, 0);
+            }
           },
         },
       });
@@ -1199,7 +1449,8 @@
         return;
       }
       sheetForm('Link name', 'e.g. Depends on', '', 'Add link', M.MAX_LINK_TEXT, function (text) {
-        if (!M.addLink(d, from, id, text)) return;
+        var entry = record('add link');
+        if (!M.addLink(d, from, id, text)) { unrecord(entry); return; }
         render(); // the first idea stays selected
         commit();
       }, { allowEmpty: true });
@@ -1210,6 +1461,7 @@
       var l = M.linkById(d, id);
       if (!l) return;
       sheetForm('Link name', 'e.g. Depends on', l.text, 'Save', M.MAX_LINK_TEXT, function (text) {
+        if (text !== l.text) record('rename link'); // the same name is no edit
         M.renameLink(d, id, text);
         render();
         commit();
@@ -1218,24 +1470,59 @@
         extra: {
           label: 'Delete link',
           onClick: function () {
+            var entry = record('delete link');
             var removed = M.removeLink(d, id);
-            if (!removed) return;
+            if (!removed) { unrecord(entry); return; }
             render();
             commit();
-            un.toast('Deleted link', {
+            deleteToast = un.toast('Deleted link', {
               priority: true,
               action: {
                 label: 'Undo',
                 handler: function () {
-                  M.restoreLinks(d, [removed]);
-                  render();
-                  commit();
+                  if (undoStack[undoStack.length - 1] === entry) undo();
                 },
               },
             });
           },
         },
       });
+    }
+
+    // The shortcuts sheet, drawn from the SHORTCUTS table above. A read-only
+    // view leaves the edit-only rows out, and a group with nothing left
+    // drops away with them. Escape closes it like any sheet.
+    function openShortcuts() {
+      var col = el('div');
+      col.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding:4px 4px 12px';
+      col.appendChild(el('h2', 'text-heading', 'Keyboard shortcuts'));
+      SHORTCUTS.forEach(function (group) {
+        var rows = group.rows.filter(function (r) { return !readOnly || !r.edit; });
+        if (!rows.length) return;
+        col.appendChild(el('p', 'section-label', group.group));
+        var list = el('ul', 'list');
+        rows.forEach(function (row) {
+          var li = el('li', 'list-row shortcut-row');
+          li.appendChild(el('span', 'shortcut-text', row.text));
+          var keys = el('span', 'keys');
+          row.keys.forEach(function (k) {
+            if (k === 'or') keys.appendChild(document.createTextNode(' or '));
+            else keys.appendChild(el('kbd', 'key', k === 'Mod' ? (IS_MAC ? 'Cmd' : 'Ctrl') : k === 'Alt' && IS_MAC ? 'Option' : k));
+          });
+          li.appendChild(keys);
+          list.appendChild(li);
+        });
+        col.appendChild(list);
+      });
+      var close = el('button', 'btn-secondary', 'Close');
+      close.type = 'button';
+      col.appendChild(close);
+      var handle = un.presentSheet({
+        contentEl: col,
+        onDismiss: function () { focusIdea(selectedId); },
+      });
+      close.addEventListener('click', function () { handle.dismiss(); });
+      setTimeout(function () { close.focus(); }, 60);
     }
 
     if (bar) {
@@ -1250,77 +1537,166 @@
     }
 
     // ── Keyboard ─────────────────────────────────────────────────────────
-    // Every shortcut edits or selects, so a read-only view has none.
+    // The whole map is reachable from the keys (#15): the arrows walk the
+    // tree by way of M.nextIdea, Tab grows the selected idea and Enter adds
+    // the next one after it, ? opens the shortcuts sheet, and Alt+arrows
+    // keep the pointer-free nudge. A read-only view keeps the walk, the zoom
+    // and the sheet; every key that edits waits for an owned map.
     rootEl.addEventListener('keydown', function (e) {
-      if (readOnly) return;
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
       if (e.target.isContentEditable) return; // the inline editor's own keys
+      var key = e.key;
+
+      // Global keys, wherever focus sits: the sheet, and the view keys. Mod
+      // is Cmd or Ctrl — both are accepted on every platform.
+      if (key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        openShortcuts();
+        e.preventDefault();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        if (key === '0') { fit(true); e.preventDefault(); return; }
+        if (key === '=' || key === '+') { zoomBy(1.25); e.preventDefault(); return; }
+        if (key === '-') { zoomBy(0.8); e.preventDefault(); return; }
+      }
+
       // A key on a bar's or the menu's own button is that button's: Enter
       // presses it, rather than adding an idea. Escape in the menu closes it
       // and hands focus back to the idea.
       if (e.target.closest && e.target.closest('.topbar, .bottom-bar, .idea-menu')) {
-        if (e.key === 'Escape' && e.target.closest('.idea-menu') && selectedId) {
+        if (key === 'Escape' && e.target.closest('.idea-menu') && selectedId) {
           var back = els.get(selectedId);
           select(null);
           if (back) back.focus();
           e.preventDefault();
-        } else if (e.key === 'Escape' && linkingFrom) {
+        } else if (key === 'Escape' && linkingFrom) {
           cancelLink();
           e.preventDefault();
-        } else if (e.key === 'Escape') {
+        } else if (key === 'Escape') {
           select(null);
         }
-        return;
+        // While a link waits the arrows keep walking, so focus can leave the
+        // Cancel button and move idea to idea.
+        if (!(linkingFrom && key.indexOf('Arrow') === 0)) return;
       }
+
       var focused = e.target.closest ? e.target.closest('.idea') : null;
       var focusedId = focused ? focused.dataset.id : null;
       var focusedLink = e.target.closest ? e.target.closest('.link-label') : null;
-      if (linkingFrom) {
-        // While a link waits, Enter on an idea finishes it and Escape stops
-        // it. Arrows still move the selected idea; the shortcuts for the
-        // hidden buttons wait.
-        if (e.key === 'Enter' && focusedId) { finishLink(focusedId); e.preventDefault(); }
-        else if (e.key === 'Escape') { cancelLink(); e.preventDefault(); }
-        if (e.key.indexOf('Arrow') !== 0) return;
-      } else if (focusedLink && (e.key === 'Enter' || e.key === ' ')) {
+
+      // A link's name opens like a tap on it — on an owned map only, where
+      // tapping it does.
+      if (!readOnly && focusedLink && (key === 'Enter' || key === ' ')) {
         openLink(focusedLink.dataset.link);
         e.preventDefault();
         return;
       }
-      if (e.key === 'Enter') {
-        if (focusedId && focusedId !== selectedId) {
-          select(focusedId);
-          if (focusedId !== 'root') openMenu(focusedId);
+
+      if (key.indexOf('Arrow') === 0) {
+        var dir = key === 'ArrowLeft' ? 'left' : key === 'ArrowRight' ? 'right'
+          : key === 'ArrowUp' ? 'up' : 'down';
+        if (e.altKey && !readOnly) {
+          // Alt+arrows: the pointer-free nudge, 50 px with Shift, else 10.
+          var step = e.shiftKey ? 50 : 10;
+          var dx = dir === 'left' ? -step : dir === 'right' ? step : 0;
+          var dy = dir === 'up' ? -step : dir === 'down' ? step : 0;
+          var nudged = focusedId || selectedId;
+          if (nudged) {
+            // Rapid nudges of the same idea are one undo step; record() resets
+            // lastNudge, so the new one is set after it.
+            var now = Date.now();
+            if (!(lastNudge.id === nudged && now - lastNudge.at < 1000)) record('move idea');
+            M.moveSubtree(d, nudged, dx, dy);
+            M.subtree(d, nudged).forEach(function (m) {
+              var b = els.get(m.id);
+              if (b) { b.style.left = m.x + 'px'; b.style.top = m.y + 'px'; }
+            });
+            drawBranchesSoon();
+            commit();
+            lastNudge = { id: nudged, at: now };
+          }
           e.preventDefault();
-        } else if (selectedId) { openAdd(); e.preventDefault(); }
-      } else if (e.key === 'Tab' && !e.shiftKey && !e.altKey &&
-          (focusedId || selectedId) && !linkingFrom) {
-        // Tab adds a child and starts typing at once, like the buttons do.
-        if (focusedId && focusedId !== selectedId) select(focusedId);
-        openAdd();
+          return;
+        }
+        var at = focusedId || selectedId;
+        if (at) {
+          var target = M.nextIdea(d, at, dir);
+          select(target);
+          focusIdea(target);
+          revealIdea(target, false);
+        } else {
+          select('root'); // nothing chosen yet: the centre is where you land
+          focusIdea('root');
+        }
         e.preventDefault();
-      } else if (e.key === 'F2') {
-        closeMenu(); // the menu would cover the sheet's field
-        openRename(focusedId || selectedId);
-        e.preventDefault();
-      } else if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selectedId) { openDelete(); e.preventDefault(); }
-      } else if (e.key === 'Escape') {
+        return;
+      }
+
+      if (readOnly) return; // below here the keys change the map
+
+      if (linkingFrom) {
+        // While a link waits, Enter on an idea finishes it and Escape stops
+        // it; the arrows above moved without selecting, which would have
+        // cleared the pending link.
+        if (key === 'Enter' && focusedId) { finishLink(focusedId); e.preventDefault(); }
+        else if (key === 'Escape') { cancelLink(); e.preventDefault(); }
+        return;
+      }
+
+      if (key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        var from = focusedId || selectedId;
+        if (from) {
+          select(from);
+          openAddChain('child');
+          e.preventDefault();
+        }
+        return; // with nothing chosen, Tab keeps its usual focus walk
+      }
+
+      if (key === 'Enter') {
+        var chosen = focusedId || selectedId;
+        if (e.shiftKey) {
+          if (chosen) {
+            select(chosen);
+            openAddChain('above');
+            e.preventDefault();
+          }
+        } else if (focusedId && focusedId !== selectedId) {
+          select(focusedId); // an idea focused but not chosen: choose it
+          e.preventDefault();
+        } else if (chosen) {
+          openAddChain('below');
+          e.preventDefault();
+        }
+        return;
+      }
+
+      if (key === ' ' || key === 'F2') {
+        var named = focusedId || selectedId;
+        if (named) {
+          select(named);
+          closeMenu(); // the menu would cover the sheet's field
+          openRename(named);
+          e.preventDefault();
+        }
+        return;
+      }
+
+      if (key === 'Delete' || key === 'Backspace') {
+        var gone = focusedId || selectedId;
+        if (gone) {
+          select(gone);
+          openDelete();
+          e.preventDefault();
+        }
+        return;
+      }
+
+      if (key === 'Escape') {
         // With a menu open, Escape only closes the menu (the kit's dismissal).
-        if (!menu) select(null);
-      } else if (selectedId && e.key.indexOf('Arrow') === 0) {
-        var step = e.shiftKey ? 50 : 10;
-        var dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
-        var dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
-        if (dx || dy) {
-          M.moveSubtree(d, selectedId, dx, dy);
-          M.subtree(d, selectedId).forEach(function (n) {
-            var b = els.get(n.id);
-            if (b) { b.style.left = n.x + 'px'; b.style.top = n.y + 'px'; }
-          });
-          drawBranchesSoon();
-          commit();
-          e.preventDefault();
+        if (!menu) {
+          select(null);
+          focusIdea(null); // back to the paper
         }
       }
     });
@@ -1330,8 +1706,13 @@
     container.appendChild(rootEl);
     render();
     renderBar();
-    // Measure once the layout has settled, then fit the whole map.
-    requestAnimationFrame(function () { fit(false); });
+    renderHistory(); // both start empty, so both buttons start disabled
+    // Measure once the layout has settled, then fit the whole map and put
+    // the keys on the paper straight away.
+    requestAnimationFrame(function () {
+      fit(false);
+      rootEl.focus({ preventScroll: true });
+    });
 
     // A resized window moves the idea under the menu on screen.
     var onResize = function () { placeMenu(); };
@@ -1344,12 +1725,31 @@
       vv.addEventListener('scroll', onViewport);
     }
 
+    // Undo and redo also work when nothing on the canvas has focus (after a
+    // click on a top-bar button, say). Fields keep their own text undo.
+    function onHistoryKey(e) {
+      if (e.altKey) return;
+      var t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (!(e.ctrlKey || e.metaKey)) return;
+      var k = e.key.toLowerCase();
+      if (k === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) redo(); else undo();
+      } else if (k === 'y' && e.ctrlKey) {
+        e.preventDefault();
+        redo();
+      }
+    }
+    if (!readOnly) document.addEventListener('keydown', onHistoryKey);
+
     return {
       el: rootEl,
       setStatus: setStatus,
       fit: function () { fit(true); },
       destroy: function () {
         if (editing) finishEdit(true, false);
+        if (!readOnly) document.removeEventListener('keydown', onHistoryKey);
         root.removeEventListener('resize', onResize);
         if (vv) {
           vv.removeEventListener('resize', onViewport);
@@ -1360,9 +1760,56 @@
     };
   }
 
+  // The sheet shown when a save was refused because the map changed in
+  // another tab or on another device (#12): keep the newer copy, keep this
+  // one, or save this one as a copy. Each button closes the sheet, then runs
+  // its handler; closing it any other way calls onDismiss. Returns the
+  // sheet's handle.
+  function conflictSheet(opts) {
+    if (!root.unNative) {
+      // Without the kit there is no sheet to put buttons in: OK loads the
+      // latest, Cancel leaves the map in conflict.
+      setTimeout(function () {
+        if (window.confirm('This map changed on another device. Load the latest? Your changes here will be dropped.')) opts.onLoadLatest();
+        else opts.onDismiss();
+      }, 0);
+      return { dismiss: function () {} };
+    }
+    var chosen = false;
+    var col = el('div');
+    col.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding:4px 4px 12px';
+    col.appendChild(el('h2', 'text-heading', 'This map changed on another device.'));
+    var note = el('p', 'text-small text-muted',
+      'Your latest changes here aren’t saved yet. Load the latest to see the other version, or keep yours and replace it.');
+    note.style.marginBottom = '8px';
+    col.appendChild(note);
+    var handle = null;
+    function action(cls, text, handler) {
+      var b = el('button', cls, text);
+      b.type = 'button';
+      b.style.width = '100%';
+      b.addEventListener('click', function () {
+        if (chosen) return;
+        chosen = true;
+        if (handle) handle.dismiss();
+        handler();
+      });
+      col.appendChild(b);
+    }
+    action('btn-primary', 'Load the latest', opts.onLoadLatest);
+    action('btn-secondary', 'Keep mine', opts.onKeepMine);
+    action('btn-secondary', 'Save mine as a copy', opts.onSaveCopy);
+    handle = root.unNative.presentSheet({
+      contentEl: col,
+      onDismiss: function () { if (!chosen) { chosen = true; opts.onDismiss(); } },
+    });
+    return handle;
+  }
+
   root.M2Canvas = {
     CanvasView: CanvasView,
     loadingEl: loadingEl,
     errorEl: errorEl,
+    conflictSheet: conflictSheet,
   };
 })(typeof self !== 'undefined' ? self : this);

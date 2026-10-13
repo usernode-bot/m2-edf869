@@ -440,9 +440,9 @@
     gap: 6px;
     min-width: 0;
   }
-  /* Below 380 px the Share button keeps its icon and its aria-label only,
-     so Fit stays on screen. */
-  @media (max-width: 379px) {
+  /* Below 480 px the Maps and Share buttons keep their icons and their
+     aria-labels only, so Fit and the undo and redo buttons stay on screen. */
+  @media (max-width: 479px) {
     .topbar .btn-label {
       display: none;
     }
@@ -451,6 +451,10 @@
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+  .history {
+    display: flex;
+    gap: 4px;
   }
   .save-status {
     display: inline-flex;
@@ -657,5 +661,43 @@
     align-items: center;
     gap: 12px;
     z-index: 10;
+  }
+  /* The canvas takes the keys, so it never draws its own focus ring — the
+     selected idea shows where the keys are instead. */
+  .canvas:focus {
+    outline: none;
+  }
+
+  /* The shortcuts sheet (#15): a row of key caps beside what they do. */
+  .shortcut-row {
+    @apply flex items-center gap-3;
+  }
+  .shortcut-text {
+    @apply flex-1 min-w-0 text-small text-fg;
+  }
+  .keys {
+    @apply inline-flex flex-none items-center gap-1;
+  }
+  /* One key cap: a small raised chip with a hard bottom edge, like a key. */
+  .key {
+    @apply inline-flex items-center justify-center rounded-md border border-line bg-raised;
+    min-width: 24px;
+    padding: 1px 7px 2px;
+    border-bottom-width: 2px;
+    font-size: 13px;
+    line-height: 18px;
+    font-weight: 600;
+    color: rgb(var(--fg));
+  }
+
+  /* The keyboard button in the top bar: a keyboard-width screen only, where
+     the sheet it opens is not already openable with ?. */
+  .kbd-btn {
+    display: none;
+  }
+  @media (min-width: 768px) {
+    .kbd-btn {
+      display: inline-flex;
+    }
   }
 }
