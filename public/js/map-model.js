@@ -49,6 +49,18 @@
     return n ? d : -1;
   }
 
+  // The ideas from the root down to, but not including, this one: the
+  // breadcrumb trail of a focused branch (#25). An unknown id has none.
+  function ancestors(doc, id) {
+    var chain = [], n = node(doc, id);
+    while (n && n.parent) {
+      n = node(doc, n.parent);
+      if (!n) return [];
+      chain.unshift(n);
+    }
+    return n ? chain : [];
+  }
+
   // The colour of the branch an idea sits on: the main-idea ancestor's own.
   function branchColor(doc, id) {
     var n = node(doc, id);
@@ -679,6 +691,7 @@
     nodes: nodes,
     childrenOf: childrenOf,
     depth: depth,
+    ancestors: ancestors,
     branchColor: branchColor,
     countUnder: countUnder,
     ideaCount: ideaCount,

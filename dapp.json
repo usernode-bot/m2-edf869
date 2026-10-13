@@ -68,6 +68,11 @@
       "name": "map.shortcuts-button",
       "path": "/?demo=1",
       "expectSelector": ".kbd-btn"
+    },
+    {
+      "name": "map.demo-zoom",
+      "path": "/?demo=1",
+      "expectSelector": ".zoom-group .zoom-level"
     }
   ]
 }

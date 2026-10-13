@@ -25,6 +25,9 @@
     keyboard: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01"/><path d="M10 10h.01"/><path d="M14 10h.01"/><path d="M18 10h.01"/><path d="M7 14h10"/></svg>',
     undo: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>',
     redo: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>',
+    minus: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>',
+    minimap: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="12" y="10" width="6" height="6" rx="1"/></svg>',
+    close: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>',
   };
 
   // The keyboard shortcuts (#15), one table the sheet is drawn from, so the
@@ -51,6 +54,8 @@
       { keys: ['Mod', '0'], text: 'Fit the map to the screen' },
       { keys: ['Mod', '+'], text: 'Zoom in' },
       { keys: ['Mod', '-'], text: 'Zoom out' },
+      { keys: ['F'], text: 'Focus on the selected branch' },
+      { keys: ['C'], text: 'Center the selected idea' },
       { keys: ['?'], text: 'Open this sheet' },
     ] },
   ];
@@ -141,6 +146,13 @@
     var selectedId = null;
     var linkingFrom = null; // the idea a link starts from, while Link waits for the other
     var tx = 0, ty = 0, scale = 1;
+    var mapId = opts.mapId || null; // a guest's example map saves no view
+    // Focus mode (#25): one branch big, the rest of the map dimmed. Focus is
+    // a view state only: nothing here ever calls record().
+    var focusId = null, preFocus = null;
+    // The saved viewport per map (localStorage m2.view.<id>), restored on
+    // open instead of an auto-fit; debounced, and never while focused.
+    var saveTimer = 0;
     var els = new Map(); // node id -> button
     var linkEls = new Map(); // link id -> label button
 
@@ -217,14 +229,84 @@
     kbdBtn.appendChild(icon('keyboard'));
     kbdBtn.addEventListener('click', function () { openShortcuts(); });
     topRight.appendChild(kbdBtn);
-    var fitBtn = el('button', 'btn-secondary btn-icon');
-    fitBtn.type = 'button';
-    fitBtn.setAttribute('aria-label', 'Fit map to screen');
-    fitBtn.appendChild(icon('fit'));
-    fitBtn.addEventListener('click', function () { fit(true); });
-    topRight.appendChild(fitBtn);
     topbar.appendChild(topRight);
     rootEl.appendChild(topbar);
+
+    // ── The zoom group, minimap and focus chip (#25) ────────────────────
+    // They live over the paper like the bars: fixed size at any zoom, and a
+    // press on them is never a tap on it.
+    var zoomGroup = el('div', 'zoom-group');
+    zoomGroup.setAttribute('role', 'group');
+    zoomGroup.setAttribute('aria-label', 'Zoom');
+    var zoomBtn = function (label) {
+      var b = el('button', 'zoom-btn');
+      b.type = 'button';
+      b.setAttribute('aria-label', label);
+      b.title = label;
+      return b;
+    };
+    var ziBtn = zoomBtn('Zoom in');
+    ziBtn.appendChild(icon('plus'));
+    ziBtn.addEventListener('click', function () { zoomBy(1.25, true); });
+    var zoomLevel = el('button', 'zoom-btn zoom-level');
+    zoomLevel.type = 'button';
+    zoomLevel.addEventListener('click', function () { resetZoom(); });
+    var zoBtn = zoomBtn('Zoom out');
+    zoBtn.appendChild(icon('minus'));
+    zoBtn.addEventListener('click', function () { zoomBy(0.8, true); });
+    var fitBtn = zoomBtn('Fit map to screen');
+    fitBtn.appendChild(icon('fit'));
+    fitBtn.addEventListener('click', function () { fit(true); });
+    var mmBtn = zoomBtn('Show minimap');
+    mmBtn.appendChild(icon('minimap'));
+    mmBtn.addEventListener('click', function () { toggleMinimap(); });
+    zoomGroup.appendChild(ziBtn);
+    zoomGroup.appendChild(zoomLevel);
+    zoomGroup.appendChild(zoBtn);
+    zoomGroup.appendChild(fitBtn);
+    zoomGroup.appendChild(el('div', 'zoom-sep'));
+    zoomGroup.appendChild(mmBtn);
+    rootEl.appendChild(zoomGroup);
+
+    // The minimap: the whole map in miniature, with a rectangle for what is
+    // on screen. Drag it or tap it to move the view.
+    var minimap = el('div', 'minimap');
+    minimap.hidden = true;
+    var mmSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    mmSvg.setAttribute('class', 'mm-svg');
+    mmSvg.setAttribute('viewBox', '0 0 160 110');
+    mmSvg.setAttribute('aria-hidden', 'true');
+    minimap.appendChild(mmSvg);
+    var mmView = el('div', 'mm-view');
+    minimap.appendChild(mmView);
+    rootEl.appendChild(minimap);
+
+    // The focus chip under the top bar: where you are, and the way out.
+    var focusChip = el('div', 'focus-chip');
+    focusChip.hidden = true;
+    var focusLabel = el('span', 'chip-label', 'Focused on');
+    var crumbRow = el('div', 'chip-crumbs');
+    var exitBtn = el('button', 'chip-close');
+    exitBtn.type = 'button';
+    exitBtn.setAttribute('aria-label', 'Exit focus');
+    exitBtn.title = 'Exit focus';
+    exitBtn.appendChild(icon('close'));
+    exitBtn.addEventListener('click', function () { exitFocus(); });
+    focusChip.appendChild(focusLabel);
+    focusChip.appendChild(crumbRow);
+    focusChip.appendChild(exitBtn);
+    rootEl.appendChild(focusChip);
+
+    // Both looks of the paper keep the overlays clear of the bottom bar.
+    // The minimap stacks above the zoom group on a wide screen; a phone's
+    // narrow one has CSS set it beside the group instead, bottoms aligned.
+    function placeOverlays() {
+      var base = barHeight() + 12;
+      zoomGroup.style.bottom = base + 'px';
+      minimap.style.bottom = rootEl.clientWidth > 767
+        ? (base + zoomGroup.offsetHeight + 8) + 'px'
+        : base + 'px';
+    }
 
     // Bottom bar: the selection line, then Add idea, or only Cancel while a
     // link waits for its second idea. A read-only view has none of it.
@@ -314,6 +396,7 @@
           { label: 'Add idea', disabled: M.ideaCount(d) >= M.MAX_NODES || !M.canAddUnder(d, id), handler: openAdd },
           { label: 'Link', disabled: M.links(d).length >= M.MAX_LINKS, handler: startLink },
           { label: 'Move to…', disabled: M.validParents(d, id).length === 0, handler: function () { openMoveTo(id); } },
+          { label: 'Focus', disabled: id === 'root', handler: function () { focusOn(id); } },
           { label: 'Delete', destructive: true, handler: openDelete },
         ],
       });
@@ -429,6 +512,8 @@
           b.setAttribute('aria-pressed', 'true');
         }
         if (n.id !== 'root') b.setAttribute('aria-haspopup', 'menu');
+        if (M.depth(d, n.id) >= 3) b.classList.add('lvl-deep');
+        if (focusId && !underFocus(n.id)) { b.classList.add('is-dim'); b.tabIndex = -1; }
         b.setAttribute('aria-label', ideaLabel(n));
         b.style.left = n.x + 'px';
         b.style.top = n.y + 'px';
@@ -466,6 +551,7 @@
         var a = M.node(d, l.from), z = M.node(d, l.to);
         if (!b || !a || !z) return;
         b.textContent = l.text;
+        b.classList.toggle('is-dim', !!focusId && !(underFocus(l.from) && underFocus(l.to)));
         b.classList.toggle('is-empty', !l.text);
         b.setAttribute('aria-label', 'Link between ' + a.text + ' and ' + z.text + (l.text ? ', ' + l.text : ''));
       });
@@ -514,6 +600,7 @@
         var c = M.branchColor(d, n.id);
         var cls = w + ' ' + COLOR_CLASSES[c == null ? 0 : c];
         var mx = (s[0] + n.x) / 2;
+        if (focusId && !underFocus(n.id)) cls += ' dim';
         paths += '<path class="' + cls + '" d="M' + s[0] + ' ' + s[1] +
           'C' + mx + ' ' + s[1] + ', ' + mx + ' ' + n.y + ', ' + n.x + ' ' + n.y + '"/>';
       });
@@ -522,7 +609,8 @@
         var b = linkEls.get(l.id);
         if (seg && seg.line) {
           var ln = seg.line;
-          paths += '<path class="link-line" d="M' + ln[0] + ' ' + ln[1] + 'L' + ln[2] + ' ' + ln[3] + '"/>';
+          var ldim = focusId && !(underFocus(l.from) && underFocus(l.to)) ? ' dim' : '';
+          paths += '<path class="link-line' + ldim + '" d="M' + ln[0] + ' ' + ln[1] + 'L' + ln[2] + ' ' + ln[3] + '"/>';
         }
         // The label stays even when the line cannot be drawn, lifted over
         // the overlapping ideas, so the link can always be tapped to rename
@@ -535,6 +623,7 @@
       });
       svg.innerHTML = paths; // coordinates and class names only, never user text
       placeMenu(); // the selected idea may have moved or changed size
+      drawMinimap();
     }
 
     // The straight line between two linked ideas, from where it leaves one
@@ -564,10 +653,54 @@
     }
 
     // ── View transforms ──────────────────────────────────────────────────
+    // The zoom clamp (#25): ten times out to three times in, so a big map
+    // can be read from a distance or studied up close. Below FAR_SCALE the
+    // paper is a survey view: deep ideas' words and link names step aside.
+    var MIN_SCALE = 0.1, MAX_SCALE = 3, FAR_SCALE = 0.4;
+    function clampScale(s) { return Math.min(MAX_SCALE, Math.max(MIN_SCALE, s)); }
+
     function applyTransform() {
       world.style.transform = 'translate(' + tx + 'px, ' + ty + 'px) scale(' + scale + ')';
       rootEl.style.backgroundPosition = tx + 'px ' + ty + 'px';
+      var pc = Math.round(scale * 100) + '%';
+      zoomLevel.textContent = pc;
+      zoomLevel.setAttribute('aria-label', 'Reset zoom, ' + pc);
+      rootEl.classList.toggle('is-far', scale < FAR_SCALE);
       placeMenu();
+      placeMinimapView();
+      scheduleSaveView();
+    }
+
+    // ── The remembered viewport ──────────────────────────────────────────
+    // A map opens where it was left, not fitted from scratch. The view is
+    // saved 400 ms after it stops moving, per map, on this device only; a
+    // saved view that no longer overlaps the map is ignored, and focus mode
+    // never writes one (leaving focus restores the view from before it).
+    function saveView() {
+      if (!mapId) return;
+      try {
+        localStorage.setItem('m2.view.' + mapId,
+          JSON.stringify({ tx: Math.round(tx), ty: Math.round(ty), scale: scale }));
+      } catch (e) { /* private mode: the map just opens fitted */ }
+    }
+    function scheduleSaveView() {
+      if (!mapId || focusId) return;
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(saveView, 400);
+    }
+    function loadSavedView() {
+      if (!mapId) return false;
+      try {
+        var s = JSON.parse(localStorage.getItem('m2.view.' + mapId) || 'null');
+        if (!s || !isFinite(s.tx) || !isFinite(s.ty) || !isFinite(s.scale)) return false;
+        if (s.scale < MIN_SCALE || s.scale > MAX_SCALE) return false;
+        var W = rootEl.clientWidth, H = rootEl.clientHeight;
+        var x0 = -s.tx / s.scale, y0 = -s.ty / s.scale;
+        var b = bounds();
+        if (x0 + W / s.scale < b.x || x0 > b.x + b.w || y0 + H / s.scale < b.y || y0 > b.y + b.h) return false;
+        tx = s.tx; ty = s.ty; scale = s.scale;
+        return true;
+      } catch (e) { return false; }
     }
 
     // Put the idea menu just above the selected idea, centred on it and kept
@@ -575,7 +708,9 @@
     // model and the view's own numbers, so a gliding Fit lands it where the
     // idea will be.
     function placeMenu() {
-      if (!menu || menu.hidden) return;
+      // The popover's state also lives in `menu` ({ id, handle }); only the
+      // toolbar has geometry to place.
+      if (!menu || !menu.style || menu.hidden) return;
       var n = selNode();
       var box = n && boxOf(n);
       if (!box) return;
@@ -597,8 +732,8 @@
 
     function glide(on) {
       world.classList.toggle('glide', !!on && !reducedMotion);
-      // The menu moves with the same easing, so it stays on its idea.
-      if (menu) menu.classList.toggle('glide', !!on && !reducedMotion);
+      // The toolbar moves with the same easing, so it stays on its idea.
+      if (menu && menu.style) menu.classList.toggle('glide', !!on && !reducedMotion);
     }
 
     function screenToWorld(px, py) {
@@ -621,11 +756,12 @@
       return { x: x0, y: n.y - hh / 2, w: w, h: hh };
     }
 
-    // The bounding box of every idea, in world coordinates.
-    function bounds() {
+    // The bounding box of the ideas in `list` (every idea by default), in
+    // world coordinates.
+    function bounds(list) {
       var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       var any = false;
-      M.nodes(d).forEach(function (n) {
+      (list || M.nodes(d)).forEach(function (n) {
         var box = boxOf(n);
         if (!box) return;
         any = true;
@@ -636,20 +772,25 @@
       return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
     }
 
-    // Bring the whole map into the space between the bars.
-    function fit(animated) {
-      var b = bounds();
+    // Bring a box into the space between the bars, leaving room on the right
+    // for the zoom group so Fit never hides an idea behind it.
+    function fitBox(b, animated) {
       var W = rootEl.clientWidth, H = rootEl.clientHeight;
       var barH = barHeight();
       var top = 60 + 24, bottom = H - barH - 24;
-      var availW = W - 48, availH = Math.max(bottom - top, 120);
+      var availW = W - 48 - 72, availH = Math.max(bottom - top, 120);
       var s = Math.min(availW / Math.max(b.w, 1), availH / Math.max(b.h, 1), 1);
-      scale = Math.max(s, 0.3);
+      scale = Math.max(s, MIN_SCALE);
       var cx = b.x + b.w / 2, cy = b.y + b.h / 2;
-      tx = W / 2 - cx * scale;
+      tx = W / 2 - 36 - cx * scale;
       ty = (top + bottom) / 2 - cy * scale;
       glide(animated);
       applyTransform();
+    }
+
+    // Fit the whole map — or, while focused, the focused branch.
+    function fit(animated) {
+      fitBox(bounds(focusId ? M.subtree(d, focusId) : null), animated);
     }
 
     // Pan just enough to show a world point — or a box around one, when the
@@ -658,11 +799,12 @@
     // pins to its left (top) edge: one edge has to win. An optional
     // `kbBottom` (canvas pixels) tightens the bottom limit, for keeping the
     // inline editor above the on-screen keyboard.
-    function reveal(x, y, animated, w, h, kbBottom) {
+    function reveal(x, y, animated, w, h, kbBottom, padArg) {
       var sx = x * scale + tx, sy = y * scale + ty;
       var W = rootEl.clientWidth, H = rootEl.clientHeight;
       var barH = barHeight();
-      var pad = 40, top = 60 + pad, bottom = H - barH - pad;
+      var pad = typeof padArg === 'number' ? padArg : 40;
+      var top = 60 + pad, bottom = H - barH - pad;
       if (typeof kbBottom === 'number' && kbBottom < bottom) bottom = kbBottom;
       var halfW = w ? w * scale / 2 : 0, halfH = h ? h * scale / 2 : 0;
       var dx = 0, dy = 0;
@@ -677,12 +819,27 @@
       }
     }
 
-    // Pan so the whole idea named is on the paper, not just its anchor.
-    function revealIdea(id, animated) {
+    // Pan so the whole idea named is on the paper, not just its anchor. A
+    // larger `pad` keeps it clear of the overlays too (the arrows use 48).
+    function revealIdea(id, animated, pad) {
       var n = M.node(d, id);
       var box = n && boxOf(n);
       if (!n) return;
-      reveal(n.x, n.y, animated, box ? box.w : 0, box ? box.h : 0);
+      reveal(n.x, n.y, animated, box ? box.w : 0, box ? box.h : 0, null, pad);
+    }
+
+    // Put an idea in the middle of the paper (#25): the view stays at its
+    // zoom, the idea comes to you. Works read-only too.
+    function centerOn(id) {
+      var n = id && M.node(d, id);
+      if (!n) return;
+      var box = boxOf(n);
+      var cx = box ? box.x + box.w / 2 : n.x, cy = box ? box.y + box.h / 2 : n.y;
+      var W = rootEl.clientWidth, H = rootEl.clientHeight;
+      glide(true);
+      tx = W / 2 - cx * scale;
+      ty = (60 + H - barHeight()) / 2 - cy * scale;
+      applyTransform();
     }
 
     // Keyboard focus on an idea, or back on the paper when there is none.
@@ -694,16 +851,196 @@
     }
 
     // One zoom step around the middle of the space between the bars, kept
-    // inside the same 0.3–2 clamp the pinch and wheel use.
-    function zoomBy(f) {
+    // inside the same 0.1–3 clamp the pinch and wheel use.
+    function zoomBy(f, animated) {
       var W = rootEl.clientWidth, H = rootEl.clientHeight;
       var px = W / 2, py = (60 + H - barHeight()) / 2;
       var wx = (px - tx) / scale, wy = (py - ty) / scale;
-      scale = Math.min(2, Math.max(0.3, scale * f));
+      scale = clampScale(scale * f);
       tx = px - wx * scale;
       ty = py - wy * scale;
       closeMenu(); // the menu's idea slides under it at the new zoom
+      glide(animated);
       applyTransform();
+    }
+
+    // Back to 100% around the same centre: the tap on the zoom level.
+    function resetZoom() {
+      var W = rootEl.clientWidth, H = rootEl.clientHeight;
+      var px = W / 2, py = (60 + H - barHeight()) / 2;
+      var wx = (px - tx) / scale, wy = (py - ty) / scale;
+      scale = 1;
+      tx = px - wx;
+      ty = py - wy;
+      closeMenu();
+      glide(true);
+      applyTransform();
+    }
+
+    // ── Focus on a branch (#25) ──────────────────────────────────────────
+    // One idea's subtree fills the paper, everything else dims to a shadow
+    // you cannot tap. A view state only: the doc is untouched, so no
+    // record() here and nothing to undo. Leaving focus brings back the
+    // exact view from before it.
+    function underFocus(id) {
+      if (!focusId) return true;
+      var n = M.node(d, id);
+      while (n) {
+        if (n.id === focusId) return true;
+        n = n.parent ? M.node(d, n.parent) : null;
+      }
+      return false;
+    }
+
+    function focusOn(id) {
+      var n = M.node(d, id);
+      if (!n || id === 'root' || id === focusId) return;
+      if (!focusId) preFocus = { tx: tx, ty: ty, scale: scale };
+      focusId = id;
+      applyFocus();
+      renderFocusChip();
+      // Zoom so the whole branch fits, with the overlays' room reserved.
+      // The focused view is never saved; applyTransform's debounced save
+      // skips while focusId is set.
+      fitBox(bounds(M.subtree(d, id)), true);
+    }
+
+    function exitFocus() {
+      if (!focusId) return;
+      focusId = null;
+      applyFocus();
+      renderFocusChip();
+      if (preFocus) {
+        glide(true);
+        tx = preFocus.tx; ty = preFocus.ty; scale = preFocus.scale;
+        preFocus = null;
+        applyTransform();
+      }
+    }
+
+    // Bright and dim, on the ideas already on the paper; the branches and
+    // labels pick it up from drawBranches()/labelLinks().
+    function applyFocus() {
+      els.forEach(function (b, id) {
+        if (id === '__draft') return;
+        var dim = focusId && !underFocus(id);
+        b.classList.toggle('is-dim', dim);
+        b.tabIndex = dim ? -1 : 0;
+      });
+      linkEls.forEach(function (b) {
+        b.classList.remove('is-dim');
+      });
+      linkEls.forEach(function (b, lid) {
+        var l = M.linkById(d, lid);
+        if (l) b.classList.toggle('is-dim', !!focusId && !(underFocus(l.from) && underFocus(l.to)));
+      });
+      drawBranchesSoon();
+      if (bar) renderBar();
+    }
+
+    // The chip under the top bar: every idea from the root to the focused
+    // one as buttons; the root crumb leaves focus, any other refocuses there.
+    function renderFocusChip() {
+      crumbRow.textContent = '';
+      if (!focusId) {
+        focusChip.hidden = true;
+        return;
+      }
+      focusChip.hidden = false;
+      M.ancestors(d, focusId).concat([M.node(d, focusId)]).forEach(function (n) {
+        var c = el('button', 'crumb' + (n.id === focusId ? ' is-current' : ''));
+        c.type = 'button';
+        c.textContent = n.text.trim();
+        c.addEventListener('click', function () {
+          if (n.id === 'root') exitFocus();
+          else focusOn(n.id);
+        });
+        crumbRow.appendChild(c);
+      });
+      placeOverlays();
+    }
+
+    // ── The minimap ──────────────────────────────────────────────────────
+    // The whole map at thumbnail scale; the rectangle is what the screen
+    // shows. Where it sits (right or left of the zoom group) is CSS; its
+    // height above the bar is placeOverlays().
+    var mmScale = 1, mmOx = 0, mmOy = 0;
+    var MM_W = 160, MM_H = 110, MM_PAD = 10;
+    function m2x(wx) { return (wx - mmOx) * mmScale; }
+    function m2y(wy) { return (wy - mmOy) * mmScale; }
+
+    function drawMinimap() {
+      if (minimap.hidden) return;
+      var b = bounds();
+      var s = Math.min((MM_W - MM_PAD * 2) / Math.max(b.w, 1), (MM_H - MM_PAD * 2) / Math.max(b.h, 1), 0.5);
+      mmScale = s;
+      mmOx = b.x + b.w / 2 - MM_W / (2 * s);
+      mmOy = b.y + b.h / 2 - MM_H / (2 * s);
+      var out = '';
+      M.nodes(d).forEach(function (n) {
+        var box = boxOf(n);
+        if (!box) return;
+        var w = Math.max(box.w * s, 3), h = Math.max(box.h * s, 3);
+        var cls = n.id === 'root' ? 'mm-ink'
+          : 'mm-' + COLOR_NAMES[M.branchColor(d, n.id) == null ? 0 : M.branchColor(d, n.id)];
+        out += '<rect class="' + cls + '" x="' + (m2x(box.x) - 1) + '" y="' + (m2y(box.y) - 1) +
+          '" width="' + w + '" height="' + h + '" rx="1.5"/>';
+      });
+      mmSvg.innerHTML = out;
+      placeMinimapView();
+    }
+
+    // What the screen shows, in minimap pixels; coalesced to one rAF so a
+    // pinch or glide moves it without a layout pass per frame.
+    var mmFrame = 0;
+    function placeMinimapView() {
+      if (minimap.hidden || mmFrame) return;
+      mmFrame = requestAnimationFrame(function () {
+        mmFrame = 0;
+        if (minimap.hidden) return;
+        var W = rootEl.clientWidth, H = rootEl.clientHeight;
+        var x0 = (0 - tx) / scale, y0 = (0 - ty) / scale;
+        var vw = W / scale * mmScale, vh = H / scale * mmScale;
+        var left = Math.max(0, Math.min(MM_W - Math.min(vw, MM_W), m2x(x0)));
+        var top = Math.max(0, Math.min(MM_H - Math.min(vh, MM_H), m2y(y0)));
+        mmView.style.left = left + 'px';
+        mmView.style.top = top + 'px';
+        mmView.style.width = Math.max(Math.min(vw, MM_W), 10) + 'px';
+        mmView.style.height = Math.max(Math.min(vh, MM_H), 10) + 'px';
+      });
+    }
+
+    // Tap or drag anywhere on the minimap: that map point comes to the
+    // middle of the screen.
+    var mmDrag = false;
+    function mmPan(e) {
+      var r = minimap.getBoundingClientRect();
+      var wx = mmOx + (e.clientX - r.left) / mmScale;
+      var wy = mmOy + (e.clientY - r.top) / mmScale;
+      var W = rootEl.clientWidth, H = rootEl.clientHeight;
+      glide(false);
+      tx = W / 2 - wx * scale;
+      ty = (60 + H - barHeight()) / 2 - wy * scale;
+      closeMenu();
+      applyTransform();
+    }
+    minimap.addEventListener('pointerdown', function (e) {
+      mmDrag = true;
+      minimap.setPointerCapture(e.pointerId);
+      mmPan(e);
+      e.preventDefault();
+    });
+    minimap.addEventListener('pointermove', function (e) { if (mmDrag) mmPan(e); });
+    minimap.addEventListener('pointerup', function () { mmDrag = false; });
+    minimap.addEventListener('pointercancel', function () { mmDrag = false; });
+
+    function toggleMinimap(force) {
+      var show = typeof force === 'boolean' ? force : minimap.hidden;
+      minimap.hidden = !show;
+      mmBtn.setAttribute('aria-label', show ? 'Hide minimap' : 'Show minimap');
+      mmBtn.title = show ? 'Hide minimap' : 'Show minimap';
+      try { localStorage.setItem('m2.minimap', show ? '1' : '0'); } catch (e) { /* private mode */ }
+      if (show) drawMinimap();
     }
 
     // ── Gestures ─────────────────────────────────────────────────────────
@@ -720,7 +1057,7 @@
       // The bars and the idea menu float over the paper; a press on them is
       // not a tap on it (one used to clear the selection before an action
       // could act).
-      if (e.target.closest && e.target.closest('.topbar, .bottom-bar, .idea-menu')) return;
+      if (e.target.closest && e.target.closest('.topbar, .bottom-bar, .idea-menu, .zoom-group, .minimap, .focus-chip')) return;
       if (pointers.size === 2) return;
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (pointers.size === 2) {
@@ -769,7 +1106,7 @@
         var pts = Array.from(pointers.values());
         var dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
         var cx = (pts[0].x + pts[1].x) / 2, cy = (pts[0].y + pts[1].y) / 2;
-        var s = Math.min(2, Math.max(0.3, gesture.baseScale * (dist / gesture.baseDist)));
+        var s = clampScale(gesture.baseScale * (dist / gesture.baseDist));
         // Keep the world point under the starting midpoint still there.
         var wx = (gesture.baseCx - tx) / scale, wy = (gesture.baseCy - ty) / scale;
         scale = s;
@@ -873,7 +1210,7 @@
         var rect = rootEl.getBoundingClientRect();
         var px = e.clientX - rect.left, py = e.clientY - rect.top;
         var wx = (px - tx) / scale, wy = (py - ty) / scale;
-        scale = Math.min(2, Math.max(0.3, scale * Math.exp(-e.deltaY * 0.002)));
+        scale = clampScale(scale * Math.exp(-e.deltaY * 0.002));
         tx = px - wx * scale;
         ty = py - wy * scale;
       } else {
@@ -1426,6 +1763,12 @@
       var parentId = M.node(d, id).parent;
       var entry = record('delete idea');
       var removed = M.removeSubtree(d, id);
+      if (focusId && !M.node(d, focusId)) {
+        focusId = null; // the focused branch is gone; no restore, it may be gone too
+        preFocus = null;
+        applyFocus();
+        renderFocusChip();
+      }
       var under = removed.length - 1;
       var text = removed[0].text;
       select(parentId || null); // what the idea grew from takes over
@@ -1797,7 +2140,7 @@
       // A key on a bar's or the menu's own button is that button's: Enter
       // presses it, rather than adding an idea. Escape in the menu closes it
       // and hands focus back to the idea.
-      if (e.target.closest && e.target.closest('.topbar, .bottom-bar, .idea-menu')) {
+      if (e.target.closest && e.target.closest('.topbar, .bottom-bar, .idea-menu, .zoom-group, .minimap, .focus-chip')) {
         if (key === 'Escape' && e.target.closest('.idea-menu') && selectedId) {
           var back = els.get(selectedId);
           select(null);
@@ -1876,13 +2219,39 @@
         var at = focusedId || selectedId;
         if (at) {
           var target = M.nextIdea(d, at, dir);
-          select(target);
-          focusIdea(target);
-          revealIdea(target, false);
+          // Focused on a branch, the walk stays inside it.
+          if (target && focusId && !underFocus(target)) target = null;
+          if (target) {
+            select(target);
+            focusIdea(target);
+            revealIdea(target, false, 48); // a small margin, only when needed
+          }
         } else {
           select('root'); // nothing chosen yet: the centre is where you land
           focusIdea('root');
         }
+        e.preventDefault();
+        return;
+      }
+
+      if ((key === 'f' || key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        var fid = focusedId || selectedId;
+        if (fid && fid !== 'root') {
+          if (focusId === fid) exitFocus();
+          else focusOn(fid);
+          e.preventDefault();
+        }
+        return;
+      }
+      if ((key === 'c' || key === 'C') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        var cid = focusedId || selectedId;
+        if (cid) { centerOn(cid); e.preventDefault(); }
+        return;
+      }
+      // Nothing left chosen while focused: Escape leaves focus and brings
+      // back the view from before.
+      if (key === 'Escape' && focusId && !focusedId && !selectedId) {
+        exitFocus();
         e.preventDefault();
         return;
       }
@@ -1965,12 +2334,22 @@
     // Measure once the layout has settled, then fit the whole map and put
     // the keys on the paper straight away.
     requestAnimationFrame(function () {
-      fit(false);
+      placeOverlays();
+      if (!loadSavedView()) fit(false);
+      applyTransform();
+      // Shown by default on big maps on a wide screen; once the button is
+      // used the choice is kept per device, for every map.
+      var want = null;
+      try { want = localStorage.getItem('m2.minimap'); } catch (e) { /* private mode */ }
+      var show = want == null ? M.ideaCount(d) > 40 && rootEl.clientWidth > 768 : want === '1';
+      minimap.hidden = !show;
+      mmBtn.setAttribute('aria-label', show ? 'Hide minimap' : 'Show minimap');
+      drawMinimap(); // the doc's earlier redraw ran while it was hidden
       rootEl.focus({ preventScroll: true });
     });
 
     // A resized window moves the idea under the menu on screen.
-    var onResize = function () { placeMenu(); };
+    var onResize = function () { placeMenu(); placeOverlays(); placeMinimapView(); };
     root.addEventListener('resize', onResize);
     // The on-screen keyboard arriving or moving: keep the edit above it.
     var vv = root.visualViewport;
@@ -2003,6 +2382,9 @@
       setStatus: setStatus,
       fit: function () { fit(true); },
       destroy: function () {
+        // A pending save flushes on teardown, unless a focused view is what
+        // is on screen: that one is never kept.
+        if (saveTimer && !focusId) { clearTimeout(saveTimer); saveTimer = 0; saveView(); }
         if (editing) finishEdit(true, false);
         if (!readOnly) document.removeEventListener('keydown', onHistoryKey);
         root.removeEventListener('resize', onResize);

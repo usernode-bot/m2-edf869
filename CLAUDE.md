@@ -188,6 +188,7 @@ Re-theme by changing the token values there, keeping every text pair at
   (`nextIdea`, `addSibling` in `map-model.js`), and which key does what is
   the keydown handler in `canvas.js`, whose shortcuts sheet lists the same
   table (`SHORTCUTS`) the sheet renders — update both when a key changes.
+- What the viewer sees of the paper - zoom, pan, focus on a branch, the minimap's visibility - is view state, never recorded: it is not undoable and never goes in the doc. It lives in localStorage (`m2.view.<map id>`, `m2.minimap`) on the open device; a guest's example map saves nothing.
 - Maps nest 10 levels deep (`MAX_DEPTH`; the central idea is level 0). A
   new idea is placed past the end of its parent's drawn width (measured on
   the page, estimated from the text elsewhere), so deep chains never overlap.
