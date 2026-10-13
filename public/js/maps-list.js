@@ -6,7 +6,7 @@
   'use strict';
   var M = root.M2Model;
   var api = root.M2Api.api;
-  var COLOR_CLASSES = ['c-teal', 'c-amber', 'c-violet', 'c-rose', 'c-sky'];
+  var COLOR_CLASSES = ['c-teal', 'c-amber', 'c-violet', 'c-rose', 'c-sky', 'c-green', 'c-orange', 'c-indigo', 'c-pink', 'c-slate'];
 
   function el(tag, cls, text) {
     var e = document.createElement(tag);

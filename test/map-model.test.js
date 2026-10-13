@@ -156,7 +156,7 @@ test('reparent works on the example map and the result still validates', () => {
   assert.equal(M.validate(doc), null);
 });
 
-const { demoMaps, sharedDemoDoc } = require('../server/demo-maps');
+const { demoMaps, sharedDemoDoc, lisbonDoc } = require('../server/demo-maps');
 
 const DIRS = ['left', 'right', 'up', 'down'];
 
@@ -281,4 +281,161 @@ test('walking and adding never strand the keys', function () {
       assert.ok(M.node(doc, M.nextIdea(doc, from.id, dir)));
     });
   });
+});
+
+// ── ancestors (#25) ─────────────────────────────────────────────────────
+// The trail from the root down to, but not including, an idea: what the
+// focus chip shows as crumbs.
+test('ancestors walks from the root down to an idea', function () {
+  const { doc, a, a1 } = smallDoc();
+  assert.deepEqual(M.ancestors(doc, 'root'), []);
+  assert.deepEqual(M.ancestors(doc, a.id), [doc.nodes[0]]);
+  const trail = M.ancestors(doc, a1.id);
+  assert.deepEqual(trail.map((n) => n.id), [doc.nodes[0].id, a.id]);
+  assert.equal(trail[trail.length - 1].text, 'Left');
+});
+
+test('ancestors of an unknown idea are none', function () {
+  const { doc } = smallDoc();
+  assert.deepEqual(M.ancestors(doc, 'nope'), []);
+});
+
+// ---- Colour palette (#20): ten colours, setColor, pickFreeColor ----
+
+// A raw map with the main ideas given straight: text, side (x sign) and
+// colour, so a test can lay out any palette situation.
+function mainsDoc(list) {
+  const doc = { v: 1, nodes: [{ id: 'root', parent: null, text: 'Centre', x: 0, y: 0 }], links: [] };
+  list.forEach(function (m, i) {
+    doc.nodes.push({
+      id: 'm' + i, parent: 'root', text: m.text, x: m.side * (200 + 80 * i), y: 50 * i,
+      color: m.color,
+    });
+  });
+  return doc;
+}
+
+test('validate takes colours 0 to 9 on a main idea, and nothing outside', () => {
+  for (let c = 0; c < M.COLORS; c++) {
+    const doc = mainsDoc([{ text: 'M', side: 1, color: c }]);
+    assert.equal(M.validate(doc), null, 'colour ' + c + ' is on the palette');
+  }
+  [M.COLORS, -1, 1.5].forEach(function (c) {
+    const doc = mainsDoc([{ text: 'M', side: 1, color: c }]);
+    assert.equal(M.validate(doc), 'bad color');
+  });
+});
+
+test('a colour on a deeper idea still fails validation', () => {
+  const doc = mainsDoc([{ text: 'M', side: 1, color: 0 }]);
+  const kid = { id: 'k', parent: 'm0', text: 'Kid', x: 300, y: 0, color: 1 };
+  doc.nodes.push(kid);
+  assert.equal(M.validate(doc), 'color on a non-main idea');
+});
+
+test('old maps with colours 0 to 4 read exactly as they did', () => {
+  const doc = mainsDoc([
+    { text: 'A', side: 1, color: 0 },
+    { text: 'B', side: -1, color: 1 },
+    { text: 'C', side: 1, color: 2 },
+    { text: 'D', side: -1, color: 3 },
+    { text: 'E', side: 1, color: 4 },
+  ]);
+  assert.equal(M.validate(doc), null);
+  const ids = ['A', 'B', 'C', 'D', 'E'].map((t) => byText(doc, t).id);
+  ids.forEach(function (id, i) {
+    assert.equal(M.branchColor(doc, id), i);
+    assert.equal(M.branchColor(doc, byText(doc, 'A').id), 0); // unchanged each pass
+  });
+});
+
+test('the example map keeps its first five branches on colours 0 to 4', () => {
+  const doc = exampleDoc();
+  const mains = M.childrenOf(doc, 'root');
+  assert.equal(mains.length, 5);
+  mains.forEach(function (n, i) {
+    assert.equal(n.color, i, 'main ' + i + ' keeps colour ' + i);
+  });
+});
+
+test('a new main idea takes the first colour no main idea uses', () => {
+  const doc = mainsDoc([
+    { text: 'A', side: 1, color: 0 },
+    { text: 'B', side: -1, color: 1 },
+    { text: 'C', side: 1, color: 2 },
+    { text: 'D', side: -1, color: 3 },
+    { text: 'E', side: 1, color: 4 },
+  ]);
+  assert.equal(M.pickFreeColor(doc, 1), M.COLORS - 5); // the sixth colour
+  // Freeing a colour makes it the next pick, before anything later.
+  M.removeSubtree(doc, byText(doc, 'C').id);
+  assert.equal(M.pickFreeColor(doc, 1), 2);
+});
+
+test('with all colours used, the pick goes to the idea’s own side first', () => {
+  // Ten mains, every colour used, but the right side is missing colour 9.
+  const list = [];
+  for (let i = 0; i < 9; i++) list.push({ text: 'R' + i, side: 1, color: i });
+  list.push({ text: 'L', side: -1, color: 9 });
+  const doc = mainsDoc(list);
+  assert.equal(M.pickFreeColor(doc, 1), 9); // unused on the right side
+  // ...and the left side is missing none of them, so the rotation answers.
+  assert.equal(M.pickFreeColor(doc, -1), list.length % M.COLORS);
+});
+
+// ---- Find (#23): search over idea text and link names ----
+
+test('search finds ideas in tree order, folded and caseless', () => {
+  const doc = lisbonDoc();
+  // 'tram' meets Tram 28 (a child of Transit) and the tram day pass idea,
+  // walking depth-first under Transit.
+  const tram = M.search(doc, 'tram');
+  assert.deepEqual(tram.map((r) => r.id), ['c2', 'c4']);
+  tram.forEach((r) => assert.deepEqual(r, { kind: 'idea', id: r.id, field: 'text' }));
+  // Diacritics and case fold away: Cafe, CAFÉ, belem.
+  const cafe = M.search(doc, 'cafe');
+  assert.deepEqual(cafe.map((r) => r.id), ['a3']);
+  assert.deepEqual(M.search(doc, 'CAFÉ').map((r) => r.id), ['a3']);
+  assert.deepEqual(M.search(doc, 'belem').map((r) => r.id), ['b2']);
+});
+
+test('search finds a link by its name, and skips unnamed ones', () => {
+  const doc = lisbonDoc();
+  const arrive = M.search(doc, 'arrive');
+  assert.deepEqual(arrive, [{ kind: 'link', id: 'l1', field: 'text' }]);
+  // An unnamed link has no name to match, ever.
+  doc.links.push({ id: 'l2', from: 'a1', to: 'b1', text: '' });
+  assert.deepEqual(M.search(doc, 'l2').length, 0);
+  assert.equal(M.search(doc, '').length, 0);
+  assert.equal(M.search(doc, '   ').length, 0);
+  assert.equal(M.search(doc, 'zzz').length, 0);
+});
+
+test('search walks depth-first: a later child precedes the next main idea', () => {
+  const { doc, a2 } = smallDoc();
+  const hits = M.search(doc, 'child');
+  // 'Left child' comes before 'Left child two' (its later sibling), and both
+  // before 'Right child' under the next main idea.
+  assert.deepEqual(hits.map((r) => r.id), [byText(doc, 'Left child').id, a2.id, byText(doc, 'Right child').id]);
+});
+
+test('search changes nothing in the document', () => {
+  const doc = lisbonDoc();
+  const before = JSON.parse(JSON.stringify(doc));
+  M.search(doc, 'tram');
+  assert.deepEqual(doc, before);
+});
+
+test('setColor changes a main idea and refuses everything else', () => {
+  const { doc, a, a1, b } = smallDoc();
+  assert.equal(M.setColor(doc, a.id, M.COLORS - 1), true);
+  assert.equal(a.color, M.COLORS - 1);
+  assert.equal(M.validate(doc), null);
+  assert.equal(M.setColor(doc, 'root', 0), false, 'the root has no colour');
+  assert.equal(M.setColor(doc, a1.id, 1), false, 'a deeper idea has no colour of its own');
+  assert.equal(M.setColor(doc, b.id, M.COLORS), false, 'past the palette');
+  assert.equal(M.setColor(doc, b.id, -1), false, 'before the palette');
+  assert.equal(M.setColor(doc, b.id, 1.5), false, 'not a whole colour');
+  assert.equal(b.color, 1, 'refused colours change nothing');
+  assert.equal(M.validate(doc), null);
 });

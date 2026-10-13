@@ -115,8 +115,9 @@ follows it, and updates it when a request changes the look on purpose.
   light / `16 19 26` dark, surface white / `26 30 40`, cool grey line and
   muted). The action colour is ink (`27 33 48` / `236 239 244`): the
   central pill and the one primary button on each screen. Branch colours,
-  lines and outlines only, never text: teal, amber, violet, rose, sky —
-  `--branch-teal` … `--branch-sky`, brighter in the dark look. Danger is
+  lines and outlines only, never text: teal, amber, violet, rose, sky,
+  green, orange, indigo, pink, slate — `--branch-teal` …
+  `--branch-slate`, brighter in the dark look. Danger is
   berry red, focus is cobalt.
 - **Signature element:** the hand-drawn feel of a classic mind map in
   clean vector shapes — colour-coded branches that curve out of the centre
@@ -168,6 +169,10 @@ Re-theme by changing the token values there, keeping every text pair at
   in memory on the open view only, and read-only viewers get none). A later
   feature that changes a map — recolour, reparent, collapse — follows the
   same rule: record first, then mutate.
+- A main idea's colour is set through `setColor` in `map-model.js` (record
+  `'change colour'` first), and a new main idea picks its colour through
+  `pickFreeColor`: the first colour no main idea uses, else the first
+  unused on its side, else the rotation.
 - A map is one JSONB document (`{ v: 1, nodes: [...] }`), validated by
   `public/js/map-model.js` on both sides — the page and `server.js`
   require the same file, so never fork the validation.
@@ -194,6 +199,7 @@ Re-theme by changing the token values there, keeping every text pair at
   (`nextIdea`, `addSibling` in `map-model.js`), and which key does what is
   the keydown handler in `canvas.js`, whose shortcuts sheet lists the same
   table (`SHORTCUTS`) the sheet renders — update both when a key changes.
+- What the viewer sees of the paper - zoom, pan, focus on a branch, the minimap's visibility - is view state, never recorded: it is not undoable and never goes in the doc. It lives in localStorage (`m2.view.<map id>`, `m2.minimap`) on the open device; a guest's example map saves nothing.
 - Maps nest 10 levels deep (`MAX_DEPTH`; the central idea is level 0). A
   new idea is placed past the end of its parent's drawn width (measured on
   the page, estimated from the text elsewhere), so deep chains never overlap.
@@ -216,3 +222,6 @@ Re-theme by changing the token values there, keeping every text pair at
   in the menu, and Alt+arrows all go through `reparent`/`moveSibling` in
   `public/js/map-model.js`; a move returns an undo record for `undoMove`,
   and links (`doc.links`) are never touched by a move.
+- Find goes through `M.search` in `map-model.js`: a new searchable field
+  (notes) is added there. A future collapse feature expands a match's
+  ancestors in `goToMatch` in `public/js/canvas.js`.

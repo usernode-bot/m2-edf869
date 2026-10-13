@@ -28,7 +28,7 @@
   var MAX_LINK_TEXT = 60;
 
   // Main-idea colours, in the order new main branches get them.
-  var COLORS = 5;
+  var COLORS = 10;
 
   function newId() {
     var s = Math.random().toString(36).slice(2, 10);
@@ -52,6 +52,18 @@
     var d = 0, n = node(doc, id);
     while (n && n.parent) { d++; n = node(doc, n.parent); }
     return n ? d : -1;
+  }
+
+  // The ideas from the root down to, but not including, this one: the
+  // breadcrumb trail of a focused branch (#25). An unknown id has none.
+  function ancestors(doc, id) {
+    var chain = [], n = node(doc, id);
+    while (n && n.parent) {
+      n = node(doc, n.parent);
+      if (!n) return [];
+      chain.unshift(n);
+    }
+    return n ? chain : [];
   }
 
   // The colour of the branch an idea sits on: the main-idea ancestor's own.
@@ -174,8 +186,38 @@
     return {
       x: place.x,
       y: place.y,
-      color: parentId === 'root' ? childrenOf(doc, 'root').length % COLORS : null,
+      color: parentId === 'root' ? pickFreeColor(doc, place.x >= 0 ? 1 : -1) : null,
     };
+  }
+
+  // The colour a new main idea gets: the first one no main idea uses
+  // anywhere on the map, else the first unused on the idea's own side
+  // (`side` is 1 right, -1 left), else the rotation. Keeps the example
+  // map's first five branches on 0-4 as they always were.
+  function pickFreeColor(doc, side, skipId) {
+    var mains = childrenOf(doc, 'root').filter(function (n) { return n.id !== skipId; });
+    var used = mains.map(function (n) { return n.color == null ? 0 : n.color; });
+    for (var c = 0; c < COLORS; c++) {
+      if (used.indexOf(c) === -1) return c;
+    }
+    var usedOnSide = mains
+      .filter(function (n) { return (n.x >= 0 ? 1 : -1) === side; })
+      .map(function (n) { return n.color == null ? 0 : n.color; });
+    for (var s = 0; s < COLORS; s++) {
+      if (usedOnSide.indexOf(s) === -1) return s;
+    }
+    return mains.length % COLORS;
+  }
+
+  // Give a main idea one of the palette colours; its whole branch follows,
+  // because branchColor() walks up to the main-idea ancestor's own. Returns
+  // false for anything but a main idea, or a colour off the palette.
+  function setColor(doc, id, color) {
+    var n = node(doc, id);
+    if (!n || n.parent !== 'root') return false;
+    if (typeof color !== 'number' || color % 1 !== 0 || color < 0 || color > COLORS - 1) return false;
+    n.color = color;
+    return true;
   }
 
   // Add an idea under parentId, placed by the same rules the canvas uses, and
@@ -945,6 +987,34 @@
     return null;
   }
 
+  // Find (#23): a query folded to lowercase without diacritics, so 'Cafe'
+  // meets 'Café' and 'BELEM' meets 'Belém'.
+  function fold(s) {
+    return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  }
+
+  // Every place a trimmed query matches, in reading order: ideas depth-first
+  // from the centre, then the named links in doc order. One result per idea
+  // (its text); an unnamed link has nothing to match. Find never edits, so
+  // the doc comes back untouched.
+  function search(doc, query) {
+    var q = fold(query).trim();
+    if (!q) return [];
+    var out = [];
+    (function walk(pid) {
+      childrenOf(doc, pid).forEach(function (n) {
+        if (fold(n.text).indexOf(q) !== -1) out.push({ kind: 'idea', id: n.id, field: 'text' });
+        walk(n.id);
+      });
+    })('root');
+    links(doc).forEach(function (l) {
+      if (l.text && fold(l.text).indexOf(q) !== -1) {
+        out.push({ kind: 'link', id: l.id, field: 'text' });
+      }
+    });
+    return out;
+  }
+
   return {
     MAX_NODES: MAX_NODES,
     MAX_TEXT: MAX_TEXT,
@@ -953,11 +1023,14 @@
     MAX_LINKS: MAX_LINKS,
     MAX_LINK_TEXT: MAX_LINK_TEXT,
     COLORS: COLORS,
+    pickFreeColor: pickFreeColor,
+    setColor: setColor,
     newId: newId,
     node: node,
     nodes: nodes,
     childrenOf: childrenOf,
     depth: depth,
+    ancestors: ancestors,
     branchColor: branchColor,
     countUnder: countUnder,
     ideaCount: ideaCount,
@@ -988,6 +1061,7 @@
     removeLink: removeLink,
     removeLinksFor: removeLinksFor,
     restoreLinks: restoreLinks,
+    search: search,
     snapshot: snapshot,
     replaceWith: replaceWith,
     validate: validate,

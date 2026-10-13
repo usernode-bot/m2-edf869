@@ -40,6 +40,11 @@
     --branch-violet: 124 58 237; /* third */
     --branch-rose: 225 29 72;    /* fourth */
     --branch-sky: 2 132 199;     /* fifth */
+    --branch-green: 21 128 61;   /* sixth */
+    --branch-orange: 194 65 12;  /* seventh */
+    --branch-indigo: 79 70 229;  /* eighth */
+    --branch-pink: 192 38 211;   /* ninth */
+    --branch-slate: 100 116 139; /* tenth */
     /* The native kit's popover surface (the idea menu): the app's own
        surface. Declared here on html, the element that also carries .dark,
        so it takes the dark surface in the dark look on its own. */
@@ -63,6 +68,11 @@
     --branch-violet: 167 139 250;
     --branch-rose: 251 113 133;
     --branch-sky: 56 189 248;
+    --branch-green: 74 222 128;
+    --branch-orange: 251 146 60;
+    --branch-indigo: 129 140 248;
+    --branch-pink: 232 121 249;
+    --branch-slate: 148 163 184;
   }
   /* el.hidden = true hides an element even when a class gives it a display
      (flex, the components below). */
@@ -405,11 +415,61 @@
   .c-violet { stroke: rgb(var(--branch-violet)); border-color: rgb(var(--branch-violet)); }
   .c-rose { stroke: rgb(var(--branch-rose)); border-color: rgb(var(--branch-rose)); }
   .c-sky { stroke: rgb(var(--branch-sky)); border-color: rgb(var(--branch-sky)); }
+  .c-green { stroke: rgb(var(--branch-green)); border-color: rgb(var(--branch-green)); }
+  .c-orange { stroke: rgb(var(--branch-orange)); border-color: rgb(var(--branch-orange)); }
+  .c-indigo { stroke: rgb(var(--branch-indigo)); border-color: rgb(var(--branch-indigo)); }
+  .c-pink { stroke: rgb(var(--branch-pink)); border-color: rgb(var(--branch-pink)); }
+  .c-slate { stroke: rgb(var(--branch-slate)); border-color: rgb(var(--branch-slate)); }
   .b-teal { background: rgb(var(--branch-teal)); }
   .b-amber { background: rgb(var(--branch-amber)); }
   .b-violet { background: rgb(var(--branch-violet)); }
   .b-rose { background: rgb(var(--branch-rose)); }
   .b-sky { background: rgb(var(--branch-sky)); }
+  .b-green { background: rgb(var(--branch-green)); }
+  .b-orange { background: rgb(var(--branch-orange)); }
+  .b-indigo { background: rgb(var(--branch-indigo)); }
+  .b-pink { background: rgb(var(--branch-pink)); }
+  .b-slate { background: rgb(var(--branch-slate)); }
+
+  /* The Colour panel (#20): a grid of swatches, five across. A swatch is a
+     44 px button carrying a 28 px disc of the colour; the branch's own
+     colour wears a surface gap, an ink ring and a check. */
+  .colour-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 44px);
+    gap: 4px;
+    padding: 4px;
+  }
+  .swatch {
+    width: 44px;
+    height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 12px;
+    background: transparent;
+    padding: 0;
+    cursor: pointer;
+  }
+  .swatch:focus-visible {
+    outline: 2px solid rgb(var(--focus));
+    outline-offset: 2px;
+  }
+  .swatch-disc {
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .swatch.is-selected .swatch-disc {
+    box-shadow: 0 0 0 2px rgb(var(--surface)), 0 0 0 4px rgb(var(--fg));
+  }
+  .swatch-disc .icon {
+    stroke: rgb(var(--surface));
+  }
 
   /* Line icons, one stroke width for every action. */
   .icon {
@@ -634,6 +694,228 @@
     }
   }
 
+  /* ── The zoom group, the minimap and the focus chip (#25) ── */
+  /* The zoom group: a small floating column at the bottom right, over the
+     paper and out of its way, like the idea menu. canvas.js sets its bottom
+     so it clears the bottom bar on a phone. */
+  .zoom-group {
+    position: absolute;
+    right: 12px;
+    z-index: 15;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 4px;
+    background: rgb(var(--surface));
+    border: 1px solid rgb(var(--line));
+    border-radius: 16px;
+    box-shadow: 0 6px 18px rgb(var(--fg) / 0.12);
+  }
+  .zoom-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    height: 44px;
+    padding: 0;
+    border: 0;
+    border-radius: 12px;
+    background: transparent;
+    color: rgb(var(--fg));
+    font: inherit;
+    cursor: pointer;
+  }
+  .zoom-btn:hover {
+    background: rgb(var(--raised));
+  }
+  .zoom-btn:focus-visible {
+    outline: 2px solid rgb(var(--focus));
+    outline-offset: -2px;
+  }
+  .zoom-level {
+    min-width: 44px;
+    height: 44px;
+    padding: 0 4px;
+    border: 0;
+    border-radius: 12px;
+    background: transparent;
+    color: rgb(var(--fg));
+    font: inherit;
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 600;
+    text-align: center;
+    cursor: pointer;
+  }
+  .zoom-level:hover {
+    background: rgb(var(--raised));
+  }
+  .zoom-level:focus-visible {
+    outline: 2px solid rgb(var(--focus));
+    outline-offset: -2px;
+  }
+  .zoom-sep {
+    width: 28px;
+    height: 1px;
+    margin: 2px auto;
+    background: rgb(var(--line));
+  }
+
+  /* The minimap: the whole map at thumbnail scale, the rectangle marking
+     what the screen shows. Tapping or dragging anywhere pans there. */
+  .minimap {
+    position: absolute;
+    right: 12px;
+    z-index: 15;
+    width: 160px;
+    height: 110px;
+    background: rgb(var(--surface));
+    border: 1px solid rgb(var(--line));
+    border-radius: 12px;
+    box-shadow: 0 6px 18px rgb(var(--fg) / 0.12);
+    overflow: hidden;
+    touch-action: none;
+    cursor: pointer;
+  }
+  .minimap[hidden] {
+    display: none;
+  }
+  .mm-svg {
+    display: block;
+  }
+  .mm-ink { fill: rgb(var(--fg)); }
+  .mm-teal { fill: rgb(var(--branch-teal)); }
+  .mm-amber { fill: rgb(var(--branch-amber)); }
+  .mm-violet { fill: rgb(var(--branch-violet)); }
+  .mm-rose { fill: rgb(var(--branch-rose)); }
+  .mm-sky { fill: rgb(var(--branch-sky)); }
+  .mm-view {
+    position: absolute;
+    border: 2px solid rgb(var(--focus));
+    border-radius: 4px;
+    box-sizing: border-box;
+    pointer-events: none;
+  }
+  /* On a phone the minimap sits to the left of the zoom group, bottoms
+     aligned (canvas.js sets both bottoms to clear the bottom bar). */
+  @media (max-width: 767px) {
+    .minimap {
+      right: 78px;
+    }
+  }
+
+  /* Focused on a branch (#25): the chip under the top bar names where you
+     are, each crumb a step back up; the root crumb leaves focus. */
+  .focus-chip {
+    position: absolute;
+    left: 50%;
+    top: 64px;
+    transform: translateX(-50%);
+    z-index: 15;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    max-width: calc(100% - 24px);
+    padding: 4px 4px 4px 14px;
+    background: rgb(var(--surface));
+    border: 1px solid rgb(var(--line));
+    border-radius: 999px;
+    box-shadow: 0 6px 18px rgb(var(--fg) / 0.12);
+  }
+  .focus-chip[hidden] {
+    display: none;
+  }
+  .chip-label {
+    flex: none;
+    color: rgb(var(--muted));
+    font-size: 14px;
+    line-height: 20px;
+    white-space: nowrap;
+  }
+  .chip-crumbs {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .crumb {
+    flex: none;
+    max-width: 160px;
+    height: 44px;
+    padding: 0 10px;
+    border: 0;
+    background: transparent;
+    color: rgb(var(--fg));
+    font: inherit;
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .crumb:hover {
+    background: rgb(var(--raised));
+  }
+  .crumb:focus-visible {
+    outline: 2px solid rgb(var(--focus));
+    outline-offset: -2px;
+  }
+  .crumb.is-current {
+    color: rgb(var(--muted));
+    cursor: default;
+  }
+  .crumb.is-current:hover {
+    background: transparent;
+  }
+  .chip-close {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: rgb(var(--fg));
+    cursor: pointer;
+  }
+  .chip-close:hover {
+    background: rgb(var(--raised));
+  }
+  .chip-close:focus-visible {
+    outline: 2px solid rgb(var(--focus));
+    outline-offset: -2px;
+  }
+
+  /* Dimmed out of the focused branch: still faintly there, but not tappable
+     and not reachable from the keys. */
+  .idea.is-dim {
+    opacity: 0.15;
+    pointer-events: none;
+  }
+  .branches path.dim,
+  .link-line.dim {
+    opacity: 0.15;
+  }
+  .link-label.is-dim {
+    opacity: 0.15;
+    pointer-events: none;
+  }
+  /* Far out, the small words go: deep ideas keep only their underline, and
+     a link's name waits until you zoom back in. */
+  .canvas.is-far .idea.lvl-deep {
+    color: transparent;
+  }
+  .canvas.is-far .link-label {
+    opacity: 0;
+    pointer-events: none;
+  }
+
   /* A map thumbnail on Your maps: the same drawing in miniature. */
   .thumb {
     width: 64px;
@@ -721,5 +1003,96 @@
     .kbd-btn {
       display: inline-flex;
     }
+  }
+
+  /* ── Find in map (#23) ─────────────────────────────────────────────── */
+  /* A compact bar over the top bar: the field, the count, and the three
+     steps. All colours come from the tokens, so both looks carry it. */
+  .find-bar {
+    position: absolute;
+    top: 8px;
+    right: 12px;
+    z-index: 30; /* over the top bar (20), so its steps stay tappable */
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    width: min(440px, calc(100% - 24px));
+    height: 44px;
+    padding: 0 4px 0 12px;
+    background: rgb(var(--surface));
+    border: 1px solid rgb(var(--line));
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgb(var(--fg) / 0.10);
+  }
+  .find-bar[hidden] {
+    display: none;
+  }
+  .find-bar > .icon {
+    flex: none;
+    color: rgb(var(--muted));
+  }
+  .find-input {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    background: transparent;
+    font-size: 16px;
+    line-height: 24px;
+    color: rgb(var(--fg));
+    outline: none;
+  }
+  .find-input::placeholder {
+    color: rgb(var(--muted) / 0.6);
+  }
+  .find-bar:focus-within {
+    box-shadow: 0 0 0 2px rgb(var(--focus));
+  }
+  .find-count {
+    padding: 0 4px;
+    font-size: 14px;
+    line-height: 20px;
+    white-space: nowrap;
+    color: rgb(var(--muted));
+  }
+  .find-step {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    border: none;
+    background: transparent;
+    border-radius: 10px;
+    color: rgb(var(--fg));
+    cursor: pointer;
+  }
+  .find-step:hover {
+    background: rgb(var(--raised));
+  }
+  .find-step:focus-visible {
+    outline: 2px solid rgb(var(--focus));
+    outline-offset: -2px;
+  }
+  .find-step:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  /* While finding: matches ring, everything else dims. Branches and link
+     lines stay full strength so the map's shape keeps its bearings. */
+  .canvas.is-finding .idea:not(.is-match),
+  .canvas.is-finding .link-label:not(.is-match) {
+    opacity: 0.35;
+  }
+  .idea.is-match,
+  .link-label.is-match {
+    box-shadow: 0 0 0 4px rgb(var(--focus) / 0.22);
+  }
+  .idea-sub.is-match {
+    border-radius: 6px;
+  }
+  .link-label.is-current {
+    outline: 2px solid rgb(var(--focus));
+    outline-offset: 2px;
   }
 }
