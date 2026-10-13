@@ -44,6 +44,7 @@
     { group: 'Move around', rows: [
       { keys: ['Arrows'], text: 'Move to the idea in that direction' },
       { keys: ['Alt', 'Arrows'], text: 'Nudge the selected idea across the paper', edit: true },
+      { keys: ['Mod', 'Alt', 'Arrows'], text: 'Reorder, promote or tuck the selected idea under its sibling', edit: true },
       { keys: ['Esc'], text: 'Close a menu or sheet, or clear the selection' },
     ] },
     { group: 'View', rows: [
@@ -312,6 +313,7 @@
           { label: 'Rename', handler: function () { openRename(id); } },
           { label: 'Add idea', disabled: M.ideaCount(d) >= M.MAX_NODES || !M.canAddUnder(d, id), handler: openAdd },
           { label: 'Link', disabled: M.links(d).length >= M.MAX_LINKS, handler: startLink },
+          { label: 'Move to…', disabled: M.validParents(d, id).length === 0, handler: function () { openMoveTo(id); } },
           { label: 'Delete', destructive: true, handler: openDelete },
         ],
       });
@@ -738,7 +740,22 @@
       } else if (ideaEl) {
         // t: when this press began, so a tap can tell whether this same press
         // already closed the idea's own menu (outside or anchor press).
-        gesture = { kind: 'maybe-drag', id: ideaEl.dataset.id, x: e.clientX, y: e.clientY, moved: false, t: e.timeStamp };
+        var dragId = ideaEl.dataset.id;
+        gesture = { kind: 'maybe-drag', id: dragId, x: e.clientX, y: e.clientY, moved: false, t: e.timeStamp };
+        // For a structural drop the subtree snaps back here first, so the
+        // model sees the layout the drag started from; and the sibling
+        // column it can slot back into, top to bottom.
+        gesture.positions = M.subtree(d, dragId).map(function (n) {
+          return { id: n.id, x: n.x, y: n.y };
+        });
+        gesture.sibs = null;
+        gesture.rank0 = -1;
+        if (dragId !== 'root') {
+          var sibs0 = M.siblingsInOrder(d, dragId);
+          gesture.rank0 = sibs0.indexOf(M.node(d, dragId));
+          gesture.sibs = sibs0.filter(function (m) { return m.id !== dragId; })
+            .map(function (m) { return m.y; });
+        }
       } else {
         gesture = { kind: 'pan', x: e.clientX, y: e.clientY, moved: false };
       }
@@ -781,6 +798,7 @@
           gesture.moved = true;
           gesture.kind = 'drag';
           closeMenu(); // dragging the idea closes its menu
+          clearDrop();
           record('move idea'); // the whole drag is one undo step
         }
         var wdx = (e.clientX - (gesture.lastX == null ? gesture.x : gesture.lastX)) / scale;
@@ -792,6 +810,7 @@
           if (b) { b.style.left = n.x + 'px'; b.style.top = n.y + 'px'; }
         });
         drawBranchesSoon();
+        updateDrop(e);
       }
     });
 
@@ -803,7 +822,20 @@
         return;
       }
       if (gesture.kind === 'drag') {
-        commit();
+        var drop = gesture.drop;
+        var alt = e.altKey;
+        clearDrop();
+        if (!alt && drop && drop.kind === 'under') {
+          // Back to where the drag started, then move under the target, so
+          // the model works from the layout the ring was shown on.
+          snapBack(gesture);
+          applyMoveUnder(gesture.id, drop.id);
+        } else if (!alt && drop && drop.kind === 'rank') {
+          snapBack(gesture);
+          applyReorder(gesture.id, drop.r); // a no-op when the rank is unchanged
+        } else {
+          commit();
+        }
       } else if (gesture.kind === 'maybe-drag' && !gesture.moved) {
         var id = gesture.id;
         var now = Date.now();
@@ -1418,6 +1450,208 @@
       });
     }
 
+    // ── Moving ideas (#16) ───────────────────────────────────────────────
+    // A move is undoable with one tap, like Delete: the model returns a
+    // record of what changed, and the toast's Undo hands it back.
+    function applyMoveUnder(id, parentId) {
+      var p = M.node(d, parentId);
+      if (!p || !M.canReparent(d, id, parentId)) return;
+      var record = M.reparent(d, id, parentId, widthOf(p));
+      if (!record) return;
+      var n = M.node(d, id);
+      render();
+      select(id);
+      reveal(n.x, n.y, true);
+      commit();
+      un.toast('Moved under ' + p.text.trim(), {
+        priority: true,
+        action: {
+          label: 'Undo',
+          handler: function () {
+            if (M.undoMove(d, record)) { render(); select(id); commit(); }
+          },
+        },
+      });
+    }
+
+    // Swap an idea with the sibling at rank r of its side (0 = topmost):
+    // repeated neighbour swaps, all undone by one record.
+    function applyReorder(id, r) {
+      var n = M.node(d, id);
+      if (!n) return;
+      var sibs = M.siblingsInOrder(d, id);
+      var cur = sibs.indexOf(n);
+      if (r < 0 || r >= sibs.length || r === cur) return;
+      var copies = M.nodes(d).map(function (m) { return JSON.parse(JSON.stringify(m)); });
+      var record = { id: id, index: M.nodes(d).indexOf(n), nodes: copies };
+      var dir = r > cur ? 1 : -1;
+      while (M.siblingsInOrder(d, id).indexOf(M.node(d, id)) !== r) {
+        if (!M.moveSibling(d, id, dir)) break;
+      }
+      commit();
+      un.toast('Moved ' + n.text.trim(), {
+        priority: true,
+        action: {
+          label: 'Undo',
+          handler: function () {
+            if (M.undoMove(d, record)) { render(); select(id); commit(); }
+          },
+        },
+      });
+    }
+
+    // The Move to… sheet: every idea the picked one may go under, filtered
+    // as you type. The search field takes focus on desktop only, so a phone
+    // does not open its keyboard over the list.
+    function openMoveTo(id) {
+      var n = M.node(d, id);
+      if (!n) return;
+      var all = M.validParents(d, id);
+      var wrap = el('div');
+      wrap.style.cssText = 'display:flex;flex-direction:column;gap:12px;padding:4px 4px 12px';
+      wrap.appendChild(el('p', 'section-label', 'Move ' + n.text.trim() + ' under'));
+      var field = el('input', 'field');
+      field.type = 'text';
+      field.placeholder = 'e.g. Book a table';
+      field.setAttribute('aria-label', 'Search ideas');
+      var listEl = el('div', 'list');
+      wrap.appendChild(field);
+      wrap.appendChild(listEl);
+      var handle = null;
+      function note(t) {
+        if (t.id === 'root') return 'Central idea';
+        if (t.parent === 'root') return 'Main idea';
+        var p = M.node(d, t.parent);
+        return p ? 'Under ' + p.text.trim() : 'Idea';
+      }
+      function draw() {
+        listEl.textContent = '';
+        var needle = field.value.trim().toLowerCase();
+        var shown = all.filter(function (t) {
+          return !needle || t.text.trim().toLowerCase().indexOf(needle) !== -1;
+        });
+        if (!shown.length) {
+          listEl.appendChild(el('p', 'state-empty', 'No ideas match'));
+          return;
+        }
+        shown.forEach(function (t) {
+          var row = el('button', 'list-row');
+          row.type = 'button';
+          var text = el('div');
+          text.style.cssText = 'flex:1;min-width:0';
+          text.appendChild(el('p', 'text-body font-semibold', t.text.trim()));
+          text.appendChild(el('p', 'text-small text-muted', note(t)));
+          row.appendChild(dotFor(t));
+          row.appendChild(text);
+          row.addEventListener('click', function () {
+            handle.dismiss();
+            applyMoveUnder(id, t.id);
+          });
+          listEl.appendChild(row);
+        });
+      }
+      field.addEventListener('input', draw);
+      draw();
+      handle = un.presentSheet({ contentEl: wrap });
+      if (document.documentElement.classList.contains('un-desktop')) {
+        setTimeout(function () { field.focus(); }, 60);
+      }
+    }
+
+    // ── Drag-to-move visuals ─────────────────────────────────────────────
+    // While an idea is dragged, a valid drop target gets a focus ring and
+    // the bottom bar says what the drop would do; hovering its own sibling
+    // column shows a thin line where it would slot in.
+    var dropTargetEl = null, dropLineEl = null, dragHint = null;
+
+    function setHint(text) {
+      if (text === dragHint) return;
+      dragHint = text;
+      if (!bar) return;
+      if (text == null) { renderBar(); return; }
+      selLine.textContent = '';
+      selLine.appendChild(el('span', 'sel-meta', text));
+    }
+
+    function clearDrop() {
+      if (dropTargetEl) { dropTargetEl.classList.remove('is-drop-target'); dropTargetEl = null; }
+      if (dropLineEl && dropLineEl.parentNode) dropLineEl.parentNode.removeChild(dropLineEl);
+      dropLineEl = null;
+      setHint(null);
+    }
+
+    function snapBack(g) {
+      g.positions.forEach(function (p) {
+        var n = M.node(d, p.id);
+        if (!n) return;
+        n.x = p.x; n.y = p.y;
+        var b = els.get(p.id);
+        if (b) { b.style.left = p.x + 'px'; b.style.top = p.y + 'px'; }
+      });
+      drawBranchesSoon();
+    }
+
+    // What a drop where the pointer is would do: under an idea, into a
+    // sibling slot, or nothing (a free move). Alt holds the idea back from
+    // both, for a pure move.
+    function updateDrop(e) {
+      var rect = rootEl.getBoundingClientRect();
+      var wx = (e.clientX - rect.left - tx) / scale;
+      var wy = (e.clientY - rect.top - ty) / scale;
+      if (e.altKey || gesture.id === 'root') {
+        clearDrop();
+        setHint('Moving freely');
+        return;
+      }
+      var list = M.nodes(d);
+      for (var i = list.length - 1; i >= 0; i--) {
+        var n = list[i];
+        if (n.id === gesture.id) continue;
+        var box = boxOf(n);
+        if (!box) continue;
+        if (wx >= box.x - 4 && wx <= box.x + box.w + 4 && wy >= box.y - 4 && wy <= box.y + box.h + 4) {
+          if (!M.canReparent(d, gesture.id, n.id)) continue;
+          var b = els.get(n.id);
+          if (dropTargetEl !== b) {
+            clearDrop();
+            dropTargetEl = b;
+            if (b) b.classList.add('is-drop-target');
+          } else {
+            // Same target: drop the insertion line, if any.
+            if (dropLineEl && dropLineEl.parentNode) dropLineEl.parentNode.removeChild(dropLineEl);
+            dropLineEl = null;
+          }
+          gesture.drop = { kind: 'under', id: n.id };
+          setHint('Move under ' + n.text.trim());
+          return;
+        }
+      }
+      if (dropTargetEl) clearDrop();
+      // The sibling column: a thin line between the neighbours it would slot
+      // between, drawn from the dragged idea's own width.
+      var ys = gesture.sibs;
+      if (ys && ys.length) {
+        var top = ys[0], bottom = ys[ys.length - 1];
+        if (wy >= top - 60 && wy <= bottom + 60) {
+          var r = 0;
+          while (r < ys.length && ys[r] < wy) r++;
+          var ly = r === 0 ? top - 25 : r === ys.length ? bottom + 25 : (ys[r - 1] + ys[r]) / 2;
+          var gbox = boxOf(M.node(d, gesture.id));
+          if (gbox) {
+            if (!dropLineEl) { dropLineEl = el('div', 'drop-line'); world.appendChild(dropLineEl); }
+            dropLineEl.style.left = gbox.x + 'px';
+            dropLineEl.style.width = gbox.w + 'px';
+            dropLineEl.style.top = ly + 'px';
+            gesture.drop = { kind: 'rank', r: r };
+            setHint('Move here');
+            return;
+          }
+        }
+      }
+      gesture.drop = null;
+      setHint('Drop on an idea to move it under it');
+    }
+
     // ── Links ────────────────────────────────────────────────────────────
     // Link waits for a second idea; tapping it (or Enter on it) asks for an
     // optional name. Cancel, the paper or Escape stop without linking, and the
@@ -1540,7 +1774,7 @@
     // The whole map is reachable from the keys (#15): the arrows walk the
     // tree by way of M.nextIdea, Tab grows the selected idea and Enter adds
     // the next one after it, ? opens the shortcuts sheet, and Alt+arrows
-    // keep the pointer-free nudge. A read-only view keeps the walk, the zoom
+    // keep the pointer-free nudge (Mod+Alt+arrows restructure). A read-only view keeps the walk, the zoom
     // and the sheet; every key that edits waits for an owned map.
     rootEl.addEventListener('keydown', function (e) {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
@@ -1595,6 +1829,27 @@
       if (key.indexOf('Arrow') === 0) {
         var dir = key === 'ArrowLeft' ? 'left' : key === 'ArrowRight' ? 'right'
           : key === 'ArrowUp' ? 'up' : 'down';
+        // Mod+Alt+arrows restructure (#16): up and down swap with the
+        // neighbour above or below, left promotes to the parent's parent,
+        // right tucks the idea under the sibling above it.
+        if (e.altKey && (e.ctrlKey || e.metaKey) && !readOnly) {
+          var moving = focusedId || selectedId;
+          e.preventDefault();
+          if (moving && moving !== 'root' && !linkingFrom) {
+            select(moving);
+            var sibs = M.siblingsInOrder(d, moving);
+            var cur = sibs.indexOf(M.node(d, moving));
+            if (dir === 'up' || dir === 'down') {
+              applyReorder(moving, cur + (dir === 'up' ? -1 : 1));
+            } else if (dir === 'left') {
+              var mn = M.node(d, moving);
+              if (mn.parent !== 'root') applyMoveUnder(moving, mn.parent);
+            } else if (cur > 0) {
+              applyMoveUnder(moving, sibs[cur - 1].id);
+            }
+          }
+          return;
+        }
         if (e.altKey && !readOnly) {
           // Alt+arrows: the pointer-free nudge, 50 px with Shift, else 10.
           var step = e.shiftKey ? 50 : 10;
