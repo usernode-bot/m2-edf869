@@ -27,6 +27,10 @@
     add(colours, 'Each main idea gets its own');
     add(tidy, 'Delete what you don’t need');
     M.layout(doc);
+    // Tidying rewrites the array into screen order (right side top to
+    // bottom, then left), so the colours picked at add time no longer sit
+    // on the array's first five branches: number them in the tidied order.
+    M.childrenOf(doc, 'root').forEach(function (n, i) { n.color = i; });
     doc.layout = { auto: true }; // the example map starts kept tidy (#18)
     return doc;
   }
