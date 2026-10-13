@@ -329,6 +329,28 @@
   .idea-main.is-selected {
     border-radius: 999px;
   }
+  /* The idea a drag would land under (#16): the same ring, dashed so it
+     reads as "about to", not "is". */
+  .idea.is-drop-target {
+    outline: 2px dashed rgb(var(--focus));
+    outline-offset: 3px;
+    border-radius: 6px;
+  }
+  .idea-central.is-drop-target,
+  .idea-main.is-drop-target {
+    border-radius: 999px;
+  }
+  /* Where a dragged idea would slot among its siblings: a thin cobalt line
+     in the world, so it scales with the map. */
+  .drop-line {
+    position: absolute;
+    height: 3px;
+    border-radius: 2px;
+    background: rgb(var(--focus));
+    transform: translateY(-50%);
+    pointer-events: none;
+    z-index: 1;
+  }
   /* A new idea grows out of its parent (answers the action only). */
   @keyframes idea-in {
     from { opacity: 0; scale: 0.6; }

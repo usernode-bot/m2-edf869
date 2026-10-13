@@ -112,43 +112,54 @@
   // the map goes. `parentWidth` is the parent's drawn width when the page has
   // measured it; without it the width is estimated from the text. Returns
   // null past MAX_DEPTH.
+  // The x/y a new child of parentId gets, by addIdea's own rules: the root's
+  // less-crowded side and a free y slot, or beside the parent past the end of
+  // its text at the last child's y + 50. `parentWidth` is the parent's drawn
+  // width when the page has measured it; `skipId` is left out of the lists
+  // (reparenting uses it to leave the moved idea out of its own new home).
+  // Returns null when the parent is missing.
+  function placeUnder(doc, parentId, parentWidth, skipId) {
+    var parent = node(doc, parentId);
+    if (!parent) return null;
+    if (parentId === 'root') {
+      var mains = childrenOf(doc, 'root').filter(function (n) { return n.id !== skipId; });
+      var right = mains.filter(function (n) { return n.x >= 0; }).length;
+      var side = right <= mains.length - right ? 1 : -1; // right on a tie
+      var sameSide = mains.filter(function (n) { return (n.x >= 0 ? 1 : -1) === side; });
+      var ry = 0;
+      for (var k = 0; k <= 40; k++) {
+        var cand = k === 0 ? 0 : (k % 2 === 1 ? -Math.ceil(k / 2) * 140 : (k / 2) * 140);
+        var taken = sameSide.some(function (n) { return Math.abs(n.y - cand) < 60; });
+        if (!taken) { ry = cand; break; }
+        ry = cand;
+      }
+      return { x: 220 * side, y: ry };
+    }
+    var gp = node(doc, parent.parent);
+    var s = gp ? (parent.x >= gp.x ? 1 : -1) : 1;
+    var w = typeof parentWidth === 'number' && parentWidth > 0
+      ? parentWidth : estimatedWidth(doc, parent);
+    // A main idea's pill is centred on its anchor, so only half of it lies
+    // ahead; an outer idea's text runs from its anchor the whole way. The
+    // old fixed steps stay the minimum, so short ideas sit where they did.
+    var step = isPill(doc, parentId)
+      ? Math.max(150, Math.ceil(w / 2) + CHILD_GAP)
+      : Math.max(110, Math.ceil(w) + CHILD_GAP);
+    var kids = childrenOf(doc, parentId).filter(function (n) { return n.id !== skipId; });
+    return {
+      x: parent.x + s * step,
+      y: kids.length ? kids[kids.length - 1].y + 50 : parent.y,
+    };
+  }
+
   function addIdea(doc, parentId, text, parentWidth) {
     var parent = node(doc, parentId);
     if (!parent || !canAddUnder(doc, parentId)) return null;
     var t = trim(text);
     if (!t) return null;
-    var id = newId(), x, y, color;
-    if (parentId === 'root') {
-      var mains = childrenOf(doc, 'root');
-      var right = mains.filter(function (n) { return n.x >= 0; }).length;
-      var side = right <= mains.length - right ? 1 : -1; // right on a tie
-      var sameSide = mains.filter(function (n) { return (n.x >= 0 ? 1 : -1) === side; });
-      y = 0;
-      for (var k = 0; k <= 40; k++) {
-        var cand = k === 0 ? 0 : (k % 2 === 1 ? -Math.ceil(k / 2) * 140 : (k / 2) * 140);
-        var taken = sameSide.some(function (n) { return Math.abs(n.y - cand) < 60; });
-        if (!taken) { y = cand; break; }
-        y = cand;
-      }
-      x = 220 * side;
-      color = mains.length % COLORS;
-    } else {
-      var gp = node(doc, parent.parent);
-      var s = gp ? (parent.x >= gp.x ? 1 : -1) : 1;
-      var w = typeof parentWidth === 'number' && parentWidth > 0
-        ? parentWidth : estimatedWidth(doc, parent);
-      // A main idea's pill is centred on its anchor, so only half of it lies
-      // ahead; an outer idea's text runs from its anchor the whole way. The
-      // old fixed steps stay the minimum, so short ideas sit where they did.
-      var step = isPill(doc, parentId)
-        ? Math.max(150, Math.ceil(w / 2) + CHILD_GAP)
-        : Math.max(110, Math.ceil(w) + CHILD_GAP);
-      x = parent.x + s * step;
-      var kids = childrenOf(doc, parentId);
-      y = kids.length ? kids[kids.length - 1].y + 50 : parent.y;
-    }
-    var n = { id: id, parent: parentId, text: t, x: x, y: y };
-    if (parentId === 'root') n.color = color;
+    var place = placeUnder(doc, parentId, parentWidth);
+    var n = { id: newId(), parent: parentId, text: t, x: place.x, y: place.y };
+    if (parentId === 'root') n.color = childrenOf(doc, 'root').length % COLORS;
     doc.nodes.push(n);
     return n;
   }
@@ -176,6 +187,157 @@
   // Move an idea and everything under it.
   function moveSubtree(doc, id, dx, dy) {
     subtree(doc, id).forEach(function (n) { n.x += dx; n.y += dy; });
+  }
+
+  // ── Reparenting (#16) ─────────────────────────────────────────────────
+  // Sibling order is array order in doc.nodes, kept in step with the order
+  // shown on screen (top to bottom). Links are never touched by a move.
+
+  // Whether `id` may move under `newParentId`: not the root moving, not its
+  // current parent, not itself or one of its own ideas (a cycle), and not so
+  // deep that something in the moved subtree would pass MAX_DEPTH.
+  function canReparent(doc, id, newParentId) {
+    var n = node(doc, id), p = node(doc, newParentId);
+    if (!n || !p || id === 'root' || n.parent === newParentId) return false;
+    var mine = subtree(doc, id);
+    for (var i = 0; i < mine.length; i++) if (mine[i].id === newParentId) return false;
+    var h = 0; // the moved subtree's own height
+    mine.forEach(function (m) { h = Math.max(h, depth(doc, m.id) - depth(doc, id)); });
+    return depth(doc, newParentId) + 1 + h <= MAX_DEPTH;
+  }
+
+  // How far the next idea sits out from a parent: addIdea's step rule,
+  // applied to a measured or estimated width and the parent's pill-ness.
+  function childStep(w, pill) {
+    return pill
+      ? Math.max(150, Math.ceil(w / 2) + CHILD_GAP)
+      : Math.max(110, Math.ceil(w) + CHILD_GAP);
+  }
+
+  // Move `id` under `newParentId` with its whole subtree, fixing colours and
+  // position by the same rules a new idea gets. Returns an undo record for
+  // undoMove(), or null when the move is not allowed (canReparent).
+  function reparent(doc, id, newParentId, parentWidth) {
+    if (!canReparent(doc, id, newParentId)) return null;
+    var n = node(doc, id);
+    var record = {
+      id: id,
+      index: nodes(doc).indexOf(n),
+      nodes: subtree(doc, id).map(function (m) { return JSON.parse(JSON.stringify(m)); }),
+    };
+    var oldParent = node(doc, n.parent);
+    var oldSide = n.x >= oldParent.x ? 1 : -1;
+    var depthBefore = depth(doc, id);
+    var widthBefore = estimatedWidth(doc, n);
+    // Colours: becoming a main idea keeps the branch colour it came from
+    // (or takes the next in rotation); stopping being one loses its own.
+    var fromColor = n.color != null ? n.color : branchColor(doc, id);
+    n.parent = newParentId;
+    if (newParentId === 'root') {
+      n.color = fromColor != null ? fromColor : childrenOf(doc, 'root').length % COLORS;
+    } else {
+      delete n.color;
+    }
+    // Sit beside the new parent, and bring the subtree along by the same dx/dy.
+    var place = placeUnder(doc, newParentId, parentWidth, id);
+    moveSubtree(doc, id, place.x - n.x, place.y - n.y);
+    // Crossing the centre mirrors the subtree around the moved idea, so its
+    // own ideas still sit past its text, now facing outward the other way.
+    var newSide = n.x >= node(doc, newParentId).x ? 1 : -1;
+    if (oldSide !== newSide) {
+      var ax = n.x;
+      subtree(doc, id).forEach(function (m) { if (m !== n) m.x = 2 * ax - m.x; });
+    }
+    // Switching between pill and text changes how far its ideas sit out.
+    var depthAfter = depth(doc, id);
+    if ((depthBefore <= 1) !== (depthAfter <= 1)) {
+      var sh = childStep(estimatedWidth(doc, n), depthAfter <= 1) -
+        childStep(widthBefore, depthBefore <= 1);
+      if (sh) {
+        subtree(doc, id).forEach(function (m) {
+          if (m !== n) m.x += sh * (m.x >= n.x ? 1 : -1);
+        });
+      }
+    }
+    // Last among its new siblings: array order stays the screen order.
+    doc.nodes.splice(record.index, 1);
+    doc.nodes.push(n);
+    return record;
+  }
+
+  // Put back what reparent() changed: parent, x, y and colour on every saved
+  // node that still exists, and the moved idea back at its old array index.
+  // Refuses when the idea or its old parent is gone. True when it worked.
+  function undoMove(doc, record) {
+    if (!record || !record.nodes || !record.nodes.length) return false;
+    var n = node(doc, record.id);
+    if (!n || !node(doc, record.nodes[0].parent)) return false;
+    record.nodes.forEach(function (m) {
+      var cur = node(doc, m.id);
+      if (!cur) return;
+      cur.parent = m.parent;
+      cur.x = m.x;
+      cur.y = m.y;
+      if ('color' in m) cur.color = m.color;
+      else delete cur.color;
+    });
+    var i = nodes(doc).indexOf(n);
+    if (i >= 0 && i !== record.index && record.index >= 0 && record.index <= nodes(doc).length) {
+      doc.nodes.splice(i, 1);
+      doc.nodes.splice(record.index, 0, n);
+    }
+    return true;
+  }
+
+  // The idea's siblings on its own side of its parent (the root's x is 0 for
+  // main ideas), itself included, sorted by y; ties keep array order.
+  function siblingsInOrder(doc, id) {
+    var n = node(doc, id);
+    if (!n || n.parent == null) return [];
+    var p = node(doc, n.parent);
+    var px = p ? p.x : 0;
+    return nodes(doc)
+      .map(function (m, i) { return { n: m, i: i }; })
+      .filter(function (e) {
+        return e.n.parent === n.parent &&
+          ((e.n.x >= px ? 1 : -1) === (n.x >= px ? 1 : -1));
+      })
+      .sort(function (a, b) { return a.n.y - b.n.y || a.i - b.i; })
+      .map(function (e) { return e.n; });
+  }
+
+  // Swap an idea's place with the sibling next to it: delta −1 up, +1 down.
+  // Each subtree moves vertically by the other's y minus its own, and the two
+  // nodes swap in doc.nodes so array order stays the screen order. Doing it
+  // again with −delta restores exactly. False with no neighbour.
+  function moveSibling(doc, id, delta) {
+    var n = node(doc, id);
+    if (!n || id === 'root') return false;
+    var sibs = siblingsInOrder(doc, id);
+    var i = sibs.indexOf(n), j = i + delta;
+    if (i < 0 || j < 0 || j >= sibs.length) return false;
+    var other = sibs[j];
+    // Both deltas first: the first move changes n.y, the second reads it.
+    var dy1 = other.y - n.y, dy2 = n.y - other.y;
+    moveSubtree(doc, id, 0, dy1);
+    moveSubtree(doc, other.id, 0, dy2);
+    var list = nodes(doc);
+    var a = list.indexOf(n), b = list.indexOf(other);
+    list[a] = other;
+    list[b] = n;
+    return true;
+  }
+
+  // Every idea `id` may move under, in tree order from the root, for the
+  // Move to… sheet.
+  function validParents(doc, id) {
+    var out = [];
+    (function walk(pid) {
+      var p = node(doc, pid);
+      if (p && canReparent(doc, id, pid)) out.push(p);
+      childrenOf(doc, pid).forEach(function (k) { walk(k.id); });
+    })('root');
+    return out;
   }
 
   // Remove an idea and everything under it; returns them in tree order so
@@ -337,10 +499,15 @@
         return 'color on a non-main idea';
       }
     }
-    // A cycle would mean a node is its own ancestor.
+    // A cycle would mean a node is its own ancestor; a chain longer than
+    // MAX_DEPTH is just as unreadable, so the server enforces it too.
     for (var k = 0; k < doc.nodes.length; k++) {
       var c = doc.nodes[k], hops = 0, p = c;
-      while (p && p.parent) { p = byId[p.parent]; if (++hops > doc.nodes.length) return 'cycle'; }
+      while (p && p.parent) {
+        p = byId[p.parent];
+        if (++hops > doc.nodes.length) return 'cycle';
+        if (hops > MAX_DEPTH) return 'too deep';
+      }
     }
     return validateLinks(doc, byId);
   }
@@ -396,6 +563,12 @@
     addIdea: addIdea,
     rename: rename,
     moveSubtree: moveSubtree,
+    canReparent: canReparent,
+    reparent: reparent,
+    undoMove: undoMove,
+    siblingsInOrder: siblingsInOrder,
+    moveSibling: moveSibling,
+    validParents: validParents,
     removeSubtree: removeSubtree,
     restore: restore,
     subtree: subtree,

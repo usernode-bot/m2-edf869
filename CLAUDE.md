@@ -189,3 +189,8 @@ Re-theme by changing the token values there, keeping every text pair at
   deleted (`removeSubtree` carries them for Undo). At most 200 a map, names
   up to 60 characters.
 - Avoid adding new dependencies; express, pg and jsonwebtoken cover it.
+- Sibling order is array order in `doc.nodes`, kept the same as the order
+  shown on screen (top to bottom on a side). Drag onto an idea, "Move to…"
+  in the menu, and Alt+arrows all go through `reparent`/`moveSibling` in
+  `public/js/map-model.js`; a move returns an undo record for `undoMove`,
+  and links (`doc.links`) are never touched by a move.
