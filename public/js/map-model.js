@@ -260,6 +260,24 @@
     return null;
   }
 
+  // The doc's nodes and links as one string, for the canvas's undo history.
+  // Links are left out when the doc has none, so a snapshot of a map without
+  // links restores a map without links.
+  function snapshot(doc) {
+    var snap = { nodes: nodes(doc) };
+    if (doc && doc.links) snap.links = doc.links;
+    return JSON.stringify(snap);
+  }
+
+  // Replace a doc's nodes and links with a snapshot's, on the same doc
+  // object, so a saver holding the reference keeps saving the same doc.
+  function replaceWith(doc, snap) {
+    var s = JSON.parse(snap);
+    doc.nodes = s.nodes;
+    if (s.links) doc.links = s.links;
+    else delete doc.links;
+  }
+
   // Remove every link touching any of the ideas in `ids`; returns copies.
   function removeLinksFor(doc, ids) {
     if (!doc || !doc.links) return [];
@@ -407,6 +425,8 @@
     removeLink: removeLink,
     removeLinksFor: removeLinksFor,
     restoreLinks: restoreLinks,
+    snapshot: snapshot,
+    replaceWith: replaceWith,
     validate: validate,
   };
 });
