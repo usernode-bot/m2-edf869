@@ -221,6 +221,9 @@
     v = root.M2Canvas.CanvasView(el, {
       doc: map.doc,
       demo: isDemo,
+      // Only a real map keeps its viewport between visits; the guest's
+      // example has no id to save under.
+      mapId: guest ? null : map.id,
       readOnly: mode === 'viewer',
       initialStatus: guest ? 'guest' : 'none',
       onOpenMaps: withoutMaps ? null : function () { location.hash = '#/maps'; },

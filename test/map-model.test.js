@@ -283,6 +283,23 @@ test('walking and adding never strand the keys', function () {
   });
 });
 
+// ── ancestors (#25) ─────────────────────────────────────────────────────
+// The trail from the root down to, but not including, an idea: what the
+// focus chip shows as crumbs.
+test('ancestors walks from the root down to an idea', function () {
+  const { doc, a, a1 } = smallDoc();
+  assert.deepEqual(M.ancestors(doc, 'root'), []);
+  assert.deepEqual(M.ancestors(doc, a.id), [doc.nodes[0]]);
+  const trail = M.ancestors(doc, a1.id);
+  assert.deepEqual(trail.map((n) => n.id), [doc.nodes[0].id, a.id]);
+  assert.equal(trail[trail.length - 1].text, 'Left');
+});
+
+test('ancestors of an unknown idea are none', function () {
+  const { doc } = smallDoc();
+  assert.deepEqual(M.ancestors(doc, 'nope'), []);
+});
+
 // ---- Colour palette (#20): ten colours, setColor, pickFreeColor ----
 
 // A raw map with the main ideas given straight: text, side (x sign) and
