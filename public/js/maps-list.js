@@ -49,6 +49,7 @@
     var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('class', 'thumb');
     svg.setAttribute('viewBox', '0 0 64 48');
+    svg.setAttribute('aria-hidden', 'true'); // the row's name button says it all
     var f = M.outlineFit(outline, 64, 48, 6);
     var paths = '';
     (outline || []).forEach(function (p) {
@@ -210,16 +211,18 @@
       row.appendChild(thumbSvg(map.outline));
       var textCol = el('div');
       textCol.style.cssText = 'flex:1;min-width:0';
+      // One button carries the name and its line under it: one 44 px stop
+      // that says both, instead of a name with text hanging outside it.
       var nameBtn = el('button');
       nameBtn.type = 'button';
-      nameBtn.style.cssText = 'display:block;width:100%;text-align:left;background:none;border:0;padding:0;font:inherit;color:inherit;cursor:pointer';
+      nameBtn.style.cssText = 'display:block;width:100%;min-height:44px;text-align:left;background:none;border:0;padding:0;font:inherit;color:inherit;cursor:pointer';
       var name = el('p', 'text-body font-semibold', map.title);
       name.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
       nameBtn.appendChild(name);
-      nameBtn.setAttribute('aria-label', 'Open ' + map.title);
+      nameBtn.appendChild(el('p', 'text-small text-muted', meta));
+      nameBtn.setAttribute('aria-label', 'Open ' + map.title + ', ' + meta);
       nameBtn.addEventListener('click', function () { opts.onOpen(map.id); });
       textCol.appendChild(nameBtn);
-      textCol.appendChild(el('p', 'text-small text-muted', meta));
       row.appendChild(textCol);
       row.appendChild(el('span', 'text-small text-muted', relativeTime(map.updatedAt)));
       return row;

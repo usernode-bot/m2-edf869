@@ -36,7 +36,7 @@
     --on-danger: 255 255 255;
     --focus: 59 91 219;          /* selection ring, keyboard focus */
     --branch-teal: 13 148 136;   /* first main branch */
-    --branch-amber: 217 119 6;   /* second */
+    --branch-amber: 204 110 6;   /* second */
     --branch-violet: 124 58 237; /* third */
     --branch-rose: 225 29 72;    /* fourth */
     --branch-sky: 2 132 199;     /* fifth */
@@ -78,6 +78,34 @@
      (flex, the components below). */
   [hidden]:where(:not([hidden="until-found"])) {
     display: none !important;
+  }
+  /* A visible keyboard-focus ring on every control that can take one. The
+     components below have their own (often a ring, which an outline would
+     double); this base rule is the backstop for anything without one — the
+     tree's idea buttons, the minimap, the map rows. The canvas is left out
+     on purpose: it never shows a ring, the selected idea does. */
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 2px solid rgb(var(--focus));
+    outline-offset: 2px;
+  }
+  /* For screen readers only: visually hidden, still read out. The
+     announcer lives on this class. (Hand-written rather than Tailwind's
+     utility, so it exists even if the compiler never sees the class.) */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
   }
 }
 
@@ -325,6 +353,17 @@
   .idea-sub.left {
     transform: translate(-100%, -50%);
   }
+  /* A generous hit area around a shallow idea's underline (#39): the pill
+     is a thin line of text, so the invisible band above and below makes it
+     tappable. Pointer events only — it must not swallow the keyboard. */
+  .idea-sub:not(.is-editing)::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: -8px;
+    bottom: -8px;
+  }
   /* Ideas wrap only past about 220 px, so short ones stay on one line.
      Newlines are kept (Shift+Enter inside the inline editor puts one in). */
   .idea {
@@ -406,6 +445,7 @@
   @media (prefers-reduced-motion: reduce) {
     .idea-in { animation: none; }
     .world.glide { transition: none; }
+    .idea-menu.glide { transition: none; }
   }
 
   /* One colour per branch, from the centre to its tips. Whole literal class

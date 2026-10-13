@@ -30,6 +30,16 @@
       "expectSelector": ".topbar .undo-btn"
     },
     {
+      "name": "map.demo-tree",
+      "path": "/?demo=1",
+      "expectSelector": "[role=\"tree\"] [role=\"treeitem\"][aria-level=\"1\"][tabindex=\"0\"]"
+    },
+    {
+      "name": "map.demo-announcer",
+      "path": "/?demo=1",
+      "expectSelector": "#announcer[aria-live=\"polite\"]"
+    },
+    {
       "name": "map.demo-maps-list",
       "path": "/?demo=1#/maps",
       "expectText": "Staging demo maps"

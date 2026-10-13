@@ -439,3 +439,56 @@ test('setColor changes a main idea and refuses everything else', () => {
   assert.equal(b.color, 1, 'refused colours change nothing');
   assert.equal(M.validate(doc), null);
 });
+
+// ---- Tree order (#39): the map as a screen reader walks it ----
+
+test('treeOrder walks pre-order from the centre, with level, rank and size', () => {
+  const { doc, a, b, a1, a2, b1 } = smallDoc();
+  const order = M.treeOrder(doc);
+  assert.deepEqual(order.map((t) => t.node.id), [doc.nodes[0].id, a.id, a1.id, a2.id, b.id, b1.id]);
+  // The centre: level 1, the one and only at its rank.
+  assert.equal(order[0].level, 1);
+  assert.equal(order[0].pos, 1);
+  assert.equal(order[0].size, 1);
+  // The main ideas: level 2, ranked among both, each with its own children.
+  assert.equal(order[1].level, 2);
+  assert.equal(order[1].pos, 1);
+  assert.equal(order[1].size, 2);
+  assert.equal(order[4].pos, 2);
+  // A grandchild is level 3.
+  assert.equal(order[2].level, 3);
+  assert.equal(order[2].node, a1);
+});
+
+test('treeOrder says which ideas have children, for aria-expanded', () => {
+  const { doc, a, a1, b1 } = smallDoc();
+  const order = M.treeOrder(doc);
+  const has = Object.fromEntries(order.map((t) => [t.node.id, t.hasChildren]));
+  assert.equal(has[a.id], true);
+  assert.equal(has[a1.id], false, 'a leaf says so');
+  assert.equal(has[b1.id], false);
+  assert.equal(has[doc.nodes[0].id], true);
+});
+
+test('treeOrder keeps a collapsed idea and walks its children anyway', () => {
+  const { doc, a, a1 } = smallDoc();
+  a.collapsed = true;
+  const order = M.treeOrder(doc);
+  assert.ok(order.some((t) => t.node === a), 'the collapsed idea is still in the tree');
+  assert.ok(order.some((t) => t.node === a1), 'its children are still after it');
+});
+
+test('treeOrder skips an idea whose parent is gone', () => {
+  const { doc, b, b1 } = smallDoc();
+  doc.nodes.splice(doc.nodes.indexOf(b), 1);
+  const order = M.treeOrder(doc);
+  assert.ok(!order.some((t) => t.node === b1), 'the orphan never appears');
+});
+
+test('treeOrder answers an empty doc with nothing and changes no document', () => {
+  assert.deepEqual(M.treeOrder({ v: 1, nodes: [] }), []);
+  const { doc } = smallDoc();
+  const before = JSON.parse(JSON.stringify(doc));
+  M.treeOrder(doc);
+  assert.deepEqual(doc, before);
+});

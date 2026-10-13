@@ -52,7 +52,7 @@
       { keys: ['Arrows'], text: 'Move to the idea in that direction' },
       { keys: ['Alt', 'Arrows'], text: 'Nudge the selected idea across the paper, when Keep tidy is off', edit: true },
       { keys: ['Mod', 'Alt', 'Arrows'], text: 'Reorder, promote or tuck the selected idea under its sibling', edit: true },
-      { keys: ['Esc'], text: 'Close a menu or sheet, or clear the selection' },
+      { keys: ['Esc'], text: 'Close a menu or sheet, or clear the selection, so Tab leaves the map' },
     ] },
     { group: 'View', rows: [
       { keys: ['Mod', '0'], text: 'Fit the map to the screen' },
@@ -78,7 +78,23 @@
     return span.firstChild;
   }
 
-  var reducedMotion = root.matchMedia && root.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // Reduced motion is read live: the viewer can flip the OS setting while
+  // the map is open, and every glide stops (or restarts) right away.
+  var motionQuery = root.matchMedia && root.matchMedia('(prefers-reduced-motion: reduce)');
+  var reducedMotion = motionQuery ? motionQuery.matches : false;
+  if (motionQuery && motionQuery.addEventListener) {
+    motionQuery.addEventListener('change', function (e) { reducedMotion = e.matches; });
+  }
+
+  // Say something to screen readers, once, without moving focus. The live
+  // region sits outside #app (index.html), so it survives a view swap; if
+  // it is missing there is nothing to say into.
+  function announce(text) {
+    var live = document.getElementById('announcer');
+    if (!live) return;
+    live.textContent = '';
+    setTimeout(function () { live.textContent = text; }, 50);
+  }
 
   // Small stand-ins used only if the native UI kit did not load: the app
   // stays usable, just plainer.
@@ -174,9 +190,16 @@
     var world = el('div', 'world');
     var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('class', 'branches');
+    svg.setAttribute('aria-hidden', 'true'); // the curves carry no meaning a reader needs
     world.appendChild(svg);
     var labelLayer = el('div', 'link-labels');
     world.appendChild(labelLayer);
+    // The tree layer: what screen readers walk. Its children are absolutely
+    // positioned against .world like before, so it needs no styling; the
+    // branches and link lines stay aria-hidden graphics beside it.
+    var treeEl = el('div', 'ideas');
+    treeEl.setAttribute('role', 'tree');
+    world.appendChild(treeEl);
     rootEl.appendChild(world);
 
     // Top bar: Maps, the demo and View only pills, save status, Share and Fit.
@@ -391,6 +414,7 @@
       return bar ? bar.offsetHeight || 100 : 0;
     }
 
+    var saveFailing = false; // said once when saving starts to fail, once when it recovers
     function setStatus(kind) {
       statusEl.hidden = readOnly || kind === 'none';
       statusEl.classList.toggle('is-error', kind === 'error' || kind === 'conflict');
@@ -400,6 +424,11 @@
       else if (kind === 'conflict') { statusEl.textContent = 'Changed elsewhere'; }
       else if (kind === 'guest') { statusEl.textContent = 'Sign in to save'; }
       else { statusEl.textContent = ''; }
+      // The save status speaks at its edges only: when saving starts to
+      // fail, and when it recovers. Retries (error, saving, error) stay
+      // quiet so the live region never chatters.
+      if (kind === 'error' && !saveFailing) { saveFailing = true; announce('Couldn’t save, retrying'); }
+      else if (kind === 'saved' && saveFailing) { saveFailing = false; announce('Saved'); }
     }
     setStatus(opts.initialStatus || 'none');
 
@@ -411,6 +440,29 @@
     var menu = null; // { id, handle } while a menu is open
     var colourPop = null; // the Colour panel's handle, while it is open
     var menuClosed = { id: null, at: 0 }; // a menu this same press may have closed
+
+    // One "Go to …" row per link on this idea, so a screen-reader user can
+    // follow a named line without hunting for the other end. An unnamed
+    // link is just the other idea's name.
+    function goToItems(n) {
+      var out = [];
+      M.links(d).forEach(function (l) {
+        var otherId = l.from === n.id ? l.to : l.to === n.id ? l.from : null;
+        if (!otherId) return;
+        var other = M.node(d, otherId);
+        if (!other) return;
+        out.push({
+          label: 'Go to ' + spoken(other.text) + (l.text ? ', ' + l.text : ''),
+          handler: function () {
+            if (focusId && !underFocus(otherId)) exitFocus(); // the target may be dimmed
+            select(otherId);
+            focusIdea(otherId);
+            revealIdea(otherId, true);
+          },
+        });
+      });
+      return out;
+    }
 
     function openMenu(id) {
       if (readOnly || linkingFrom) return;
@@ -424,9 +476,10 @@
           items: [
             { label: 'Rename', handler: function () { openRename('root'); } },
             { label: 'Add idea', disabled: M.ideaCount(d) >= M.MAX_NODES, handler: openAdd },
+          ].concat(goToItems(M.node(d, 'root')), [
             { label: 'Tidy up', handler: function () { tidy('Tidy up'); commit(); } },
             { label: M.isAutoLayout(d) ? 'Turn off Keep tidy' : 'Turn on Keep tidy', handler: toggleKeepTidy },
-          ],
+          ]),
         });
         menu = { id: 'root', handle: rp };
         rp.then(function () {
@@ -439,6 +492,12 @@
       closeMenu();
       var n = M.node(d, id);
       var isMain = n.parent === 'root';
+      var sibs = M.siblingsInOrder(d, id);
+      var at = sibs.indexOf(n);
+      var moveItems = [
+        { label: 'Move up', disabled: at <= 0, handler: function () { applyReorder(id, at - 1); focusIdea(id); } },
+        { label: 'Move down', disabled: at >= sibs.length - 1, handler: function () { applyReorder(id, at + 1); focusIdea(id); } },
+      ];
       var p = un.popover({
         anchorEl: els.get(id),
         items: [
@@ -446,10 +505,12 @@
           { label: 'Add idea', disabled: M.ideaCount(d) >= M.MAX_NODES || !M.canAddUnder(d, id), handler: openAdd },
           { label: 'Link', disabled: M.links(d).length >= M.MAX_LINKS, handler: startLink },
           { label: 'Move to…', disabled: M.validParents(d, id).length === 0, handler: function () { openMoveTo(id); } },
+        ].concat(moveItems, [
           { label: 'Focus', disabled: id === 'root', handler: function () { focusOn(id); } },
           { label: 'Colour', disabled: !isMain, handler: function () { openColour(id); } },
+        ], goToItems(n), [
           { label: 'Delete', destructive: true, handler: openDelete },
-        ],
+        ]),
       });
       menu = { id: id, handle: p };
       p.then(function () {
@@ -518,6 +579,7 @@
       drawBranches();
       renderBar();
       refreshFind(); // an open find re-marks against the new doc
+      syncTree(); // edits that skip a full render still re-sync the tree
       opts.onChange();
     }
 
@@ -669,6 +731,7 @@
       var entry = from.pop();
       to.push({ label: entry.label, snap: M.snapshot(d) });
       M.replaceWith(d, entry.snap);
+      announce((from === undoStack ? 'Undone: ' : 'Redone: ') + entry.label);
       if (selectedId && !M.node(d, selectedId)) selectedId = null;
       render();
       select(selectedId);
@@ -690,10 +753,34 @@
     }
 
     // ── Rendering ────────────────────────────────────────────────────────
+    // The idea's whole spoken line, the one helper every aria-label comes
+    // from: the text, where the idea sits in the tree, and what hangs off
+    // it (ideas under it, links to other ideas). Newlines are spoken as
+    // spaces, so a two-line idea reads as one line.
+    function spoken(text) { return (text || '').replace(/\n/g, ' '); }
     function ideaLabel(n) {
-      if (n.id === 'root') return n.text + ', central idea';
-      if (n.parent === 'root') return n.text + ', main idea';
-      return n.text + ', idea';
+      if (n.id === 'root') {
+        var mains = M.childrenOf(d, 'root').length;
+        return spoken(n.text) + ', central idea, ' + mains + ' main idea' + (mains === 1 ? '' : 's');
+      }
+      var parent = M.node(d, n.parent);
+      var line = spoken(n.text) + ', level ' + (M.depth(d, n.id) + 1) +
+        ', in ' + (parent ? spoken(parent.text) : '');
+      var under = M.countUnder(d, n.id);
+      if (under > 0) line += ', ' + under + ' idea' + (under === 1 ? '' : 's') + ' under it';
+      var linked = [];
+      M.links(d).forEach(function (l) {
+        var other = l.from === n.id ? l.to : l.to === n.id ? l.from : null;
+        if (!other) return;
+        var on = M.node(d, other);
+        if (on) linked.push(spoken(on.text));
+      });
+      if (linked.length === 1) line += ', linked to ' + linked[0];
+      else if (linked.length === 2) line += ', linked to ' + linked[0] + ' and ' + linked[1];
+      else if (linked.length > 2) {
+        line += ', linked to ' + linked[0] + ', ' + linked[1] + ' and ' + (linked.length - 2) + ' more';
+      }
+      return line;
     }
 
     function render() {
@@ -702,11 +789,19 @@
       endTween();
       els.forEach(function (old) { if (old.parentNode) old.parentNode.removeChild(old); });
       els.clear();
-      M.nodes(d).forEach(function (n) {
+      // Ideas go into the tree layer in tree order, so what a screen reader
+      // walks is the map itself, not the draw order.
+      M.treeOrder(d).forEach(function (t) {
+        var n = t.node;
         var b = el('button', 'idea');
         b.type = 'button';
         b.textContent = n.text;
         b.dataset.id = n.id;
+        b.setAttribute('role', 'treeitem');
+        b.setAttribute('aria-level', String(t.level));
+        b.setAttribute('aria-setsize', String(t.size));
+        b.setAttribute('aria-posinset', String(t.pos));
+        if (t.hasChildren) b.setAttribute('aria-expanded', n.collapsed ? 'false' : 'true');
         if (n.id === 'root') b.classList.add('idea-central');
         else if (n.parent === 'root') {
           b.classList.add('idea-main');
@@ -718,17 +813,14 @@
           var p = M.node(d, n.parent);
           if (p && n.x < p.x) b.classList.add('left');
         }
-        if (n.id === selectedId) {
-          b.classList.add('is-selected');
-          b.setAttribute('aria-pressed', 'true');
-        }
+        if (n.id === selectedId) b.classList.add('is-selected');
         if (n.id !== 'root') b.setAttribute('aria-haspopup', 'menu');
         if (M.depth(d, n.id) >= 3) b.classList.add('lvl-deep');
-        if (focusId && !underFocus(n.id)) { b.classList.add('is-dim'); b.tabIndex = -1; }
+        if (focusId && !underFocus(n.id)) b.classList.add('is-dim');
         b.setAttribute('aria-label', ideaLabel(n));
         b.style.left = n.x + 'px';
         b.style.top = n.y + 'px';
-        world.appendChild(b);
+        treeEl.appendChild(b);
         els.set(n.id, b);
       });
       // One label per link; drawBranches() only moves them, so a drag keeps
@@ -766,6 +858,66 @@
         b.classList.toggle('is-dim', !!focusId && !(underFocus(l.from) && underFocus(l.to)));
         b.classList.toggle('is-empty', !l.text);
         b.setAttribute('aria-label', 'Link between ' + a.text + ' and ' + z.text + (l.text ? ', ' + l.text : ''));
+      });
+      syncTree();
+    }
+
+    // The idea the roving tab stop sits on: the selection, else the idea
+    // with keyboard focus, else the centre — the first one that is on the
+    // paper and bright.
+    function rovingId() {
+      var ids = [selectedId, focusId, 'root'];
+      for (var i = 0; i < ids.length; i++) {
+        var b = ids[i] && els.get(ids[i]);
+        if (b && !b.classList.contains('is-dim')) return ids[i];
+      }
+      return 'root';
+    }
+
+    // Rewrite the tree layer's facts for screen readers: the tree's name
+    // (the map's title), every idea's level, rank, expansion, spoken label
+    // and selected mark, the DOM order the reader walks, and the one roving
+    // tab stop. Runs after every change to the doc or the selection. A
+    // button that moved keeps its keyboard focus across the re-append.
+    function syncTree() {
+      if (!treeEl) return;
+      var rootN = M.node(d, 'root');
+      treeEl.setAttribute('aria-label', rootN ? rootN.text : '');
+      var order = M.treeOrder(d);
+      order.forEach(function (t) {
+        var b = els.get(t.node.id);
+        if (!b || b.getAttribute('role') !== 'treeitem') return;
+        b.setAttribute('aria-level', String(t.level));
+        b.setAttribute('aria-setsize', String(t.size));
+        b.setAttribute('aria-posinset', String(t.pos));
+        if (t.hasChildren) b.setAttribute('aria-expanded', t.node.collapsed ? 'false' : 'true');
+        else b.removeAttribute('aria-expanded');
+        b.setAttribute('aria-label', ideaLabel(t.node));
+        b.setAttribute('aria-selected', t.node.id === selectedId ? 'true' : 'false');
+      });
+      // Re-append only what moved (walking from the end, inserting before
+      // the sibling that follows it), so an idea being edited or focused
+      // elsewhere stays put.
+      var ref = null, refocus = null;
+      var active = document.activeElement;
+      for (var i = order.length - 1; i >= 0; i--) {
+        var b = els.get(order[i].node.id);
+        if (!b || b.getAttribute('role') !== 'treeitem') continue;
+        if (b.parentNode !== treeEl || b.nextSibling !== ref) {
+          if (active === b) refocus = b;
+          treeEl.insertBefore(b, ref);
+        }
+        ref = b;
+      }
+      if (refocus) refocus.focus({ preventScroll: true });
+      // One idea is tabbable (the roving tab stop); the rest sit at -1, and
+      // the dimmed ones say they are not usable right now.
+      var rove = rovingId();
+      els.forEach(function (b, id) {
+        if (b.getAttribute('role') !== 'treeitem') return;
+        b.tabIndex = id === rove ? 0 : -1;
+        if (b.classList.contains('is-dim')) b.setAttribute('aria-disabled', 'true');
+        else b.removeAttribute('aria-disabled');
       });
     }
 
@@ -1140,7 +1292,8 @@
         if (id === '__draft') return;
         var dim = focusId && !underFocus(id);
         b.classList.toggle('is-dim', dim);
-        b.tabIndex = dim ? -1 : 0;
+        if (dim) b.setAttribute('aria-disabled', 'true');
+        else b.removeAttribute('aria-disabled');
       });
       linkEls.forEach(function (b) {
         b.classList.remove('is-dim');
@@ -1149,6 +1302,7 @@
         var l = M.linkById(d, lid);
         if (l) b.classList.toggle('is-dim', !!focusId && !(underFocus(l.from) && underFocus(l.to)));
       });
+      syncTree(); // the roving tab stop and the dimmed ideas' aria-disabled
       drawBranchesSoon();
       if (bar) renderBar();
     }
@@ -1444,14 +1598,13 @@
       closeMenu(); // selecting another idea, or nothing, never leaves a stale one
       if (selectedId && els.get(selectedId)) {
         els.get(selectedId).classList.remove('is-selected');
-        els.get(selectedId).removeAttribute('aria-pressed');
       }
       selectedId = id;
       linkingFrom = null;
       if (id && els.get(id)) {
         els.get(id).classList.add('is-selected');
-        els.get(id).setAttribute('aria-pressed', 'true');
       }
+      syncTree(); // aria-selected and the roving tab stop follow the ring
       renderBar();
     }
 
@@ -1652,6 +1805,8 @@
           ? M.addIdea(d, anchor.id, text, widthOf(anchor))
           : M.addSibling(d, anchor.id, text, mode === 'above');
         if (!n) return false;
+        var parentN = M.node(d, n.parent);
+        announce('Added ' + spoken(text) + (parentN ? ' under ' + spoken(parentN.text) : ''));
         kind = 'sibling'; // the chain runs beside the idea just added
         mode = 'below';
         anchor = n;
@@ -1685,6 +1840,7 @@
         // The parent's measured width, so the new idea clears its text.
         var n = M.addIdea(d, parentId, text, widthOf(parent));
         if (!n) { unrecord(entry); return; }
+        announce('Added ' + spoken(text) + ' under ' + spoken(parent.text));
         render();
         var b = els.get(n.id);
         if (b && !reducedMotion) b.classList.add('idea-in');
@@ -1713,6 +1869,7 @@
       }
       labelLinks(); // their screen-reader names say which ideas they join
       commit();
+      announce('Renamed to ' + spoken(text));
       un.toast('Renamed to ' + text.replace(/\n/g, ' '), {
         priority: true,
         action: {
@@ -1728,6 +1885,7 @@
             }
             labelLinks();
             commit();
+            announce('Renamed back to ' + spoken(before));
           },
         },
       });
@@ -1929,6 +2087,8 @@
           var entry = record('add idea');
           var n2 = M.addIdea(d, ed.parentId, text, ed.parentWidth);
           if (n2) {
+            var parentN = M.node(d, ed.parentId);
+            announce('Added ' + spoken(text) + (parentN ? ' under ' + spoken(parentN.text) : ''));
             render();
             var b = els.get(n2.id);
             if (b && !reducedMotion) b.classList.add('idea-in');
@@ -1995,6 +2155,7 @@
       commit();
       setTimeout(function () { focusIdea(parentId || null); }, 0);
       var message = 'Deleted ' + text + (under > 0 ? ' and ' + under + ' idea' + (under === 1 ? '' : 's') + ' under it' : '');
+      announce(message + '. Undo with ' + (IS_MAC ? 'Command Z' : 'Control Z'));
       deleteToast = un.toast(message, {
         priority: true,
         action: {
@@ -2025,6 +2186,7 @@
       select(id);
       reveal(n.x, n.y, true);
       commit();
+      announce('Moved ' + spoken(n.text) + ' under ' + spoken(p.text));
       un.toast('Moved under ' + p.text.trim(), {
         priority: true,
         action: {
@@ -2051,6 +2213,7 @@
         if (!M.moveSibling(d, id, dir)) break;
       }
       commit();
+      announce('Moved ' + spoken(n.text) + ', ' + (r + 1) + ' of ' + sibs.length);
       un.toast('Moved ' + n.text.trim(), {
         priority: true,
         action: {
@@ -2645,13 +2808,17 @@
       }
 
       if (key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-        var from = focusedId || selectedId;
-        if (from) {
-          select(from);
+        // Tab adds an idea only when the ring is squarely on one idea: the
+        // focus is it, or the focus is free and one is selected. Otherwise
+        // Tab leaves the map, as a keyboard user expects — Esc clears the
+        // selection to let it go.
+        var armed = (focusedId && focusedId === selectedId) || (!focusedId && selectedId);
+        if (armed) {
+          select(focusedId || selectedId);
           openAddChain('child');
           e.preventDefault();
         }
-        return; // with nothing chosen, Tab keeps its usual focus walk
+        return; // with nothing armed, Tab keeps its usual focus walk
       }
 
       if (key === 'Enter') {

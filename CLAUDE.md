@@ -225,3 +225,12 @@ Re-theme by changing the token values there, keeping every text pair at
 - Find goes through `M.search` in `map-model.js`: a new searchable field
   (notes) is added there. A future collapse feature expands a match's
   ancestors in `goToMatch` in `public/js/canvas.js`.
+- Accessibility (#39) has one home per concern: an idea's whole spoken line
+  comes only from `ideaLabel` in `canvas.js` (new facts about an idea — a
+  notes field, tasks — are added there); changes the viewer should hear go
+  through `announce()` (the `#announcer` live region sits outside `#app` in
+  index.html, because views clear that container); ideas render in
+  `M.treeOrder(doc)` order inside the `role="tree"` layer; and exactly one
+  idea holds `tabindex="0"` (the roving stop chosen by `rovingId`). A new
+  edit path ends in `commit()` and gets its announcement for free — no
+  second code path may set `aria-label` or speak its own way.
