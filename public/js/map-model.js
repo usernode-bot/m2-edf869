@@ -23,7 +23,7 @@
   var MAX_LINK_TEXT = 60;
 
   // Main-idea colours, in the order new main branches get them.
-  var COLORS = 5;
+  var COLORS = 10;
 
   function newId() {
     var s = Math.random().toString(36).slice(2, 10);
@@ -168,8 +168,38 @@
     return {
       x: place.x,
       y: place.y,
-      color: parentId === 'root' ? childrenOf(doc, 'root').length % COLORS : null,
+      color: parentId === 'root' ? pickFreeColor(doc, place.x >= 0 ? 1 : -1) : null,
     };
+  }
+
+  // The colour a new main idea gets: the first one no main idea uses
+  // anywhere on the map, else the first unused on the idea's own side
+  // (`side` is 1 right, -1 left), else the rotation. Keeps the example
+  // map's first five branches on 0-4 as they always were.
+  function pickFreeColor(doc, side, skipId) {
+    var mains = childrenOf(doc, 'root').filter(function (n) { return n.id !== skipId; });
+    var used = mains.map(function (n) { return n.color == null ? 0 : n.color; });
+    for (var c = 0; c < COLORS; c++) {
+      if (used.indexOf(c) === -1) return c;
+    }
+    var usedOnSide = mains
+      .filter(function (n) { return (n.x >= 0 ? 1 : -1) === side; })
+      .map(function (n) { return n.color == null ? 0 : n.color; });
+    for (var s = 0; s < COLORS; s++) {
+      if (usedOnSide.indexOf(s) === -1) return s;
+    }
+    return mains.length % COLORS;
+  }
+
+  // Give a main idea one of the palette colours; its whole branch follows,
+  // because branchColor() walks up to the main-idea ancestor's own. Returns
+  // false for anything but a main idea, or a colour off the palette.
+  function setColor(doc, id, color) {
+    var n = node(doc, id);
+    if (!n || n.parent !== 'root') return false;
+    if (typeof color !== 'number' || color % 1 !== 0 || color < 0 || color > COLORS - 1) return false;
+    n.color = color;
+    return true;
   }
 
   // Add an idea under parentId, placed by the same rules the canvas uses, and
@@ -686,6 +716,8 @@
     MAX_LINKS: MAX_LINKS,
     MAX_LINK_TEXT: MAX_LINK_TEXT,
     COLORS: COLORS,
+    pickFreeColor: pickFreeColor,
+    setColor: setColor,
     newId: newId,
     node: node,
     nodes: nodes,

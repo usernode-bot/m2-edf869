@@ -115,8 +115,9 @@ follows it, and updates it when a request changes the look on purpose.
   light / `16 19 26` dark, surface white / `26 30 40`, cool grey line and
   muted). The action colour is ink (`27 33 48` / `236 239 244`): the
   central pill and the one primary button on each screen. Branch colours,
-  lines and outlines only, never text: teal, amber, violet, rose, sky —
-  `--branch-teal` … `--branch-sky`, brighter in the dark look. Danger is
+  lines and outlines only, never text: teal, amber, violet, rose, sky,
+  green, orange, indigo, pink, slate — `--branch-teal` …
+  `--branch-slate`, brighter in the dark look. Danger is
   berry red, focus is cobalt.
 - **Signature element:** the hand-drawn feel of a classic mind map in
   clean vector shapes — colour-coded branches that curve out of the centre
@@ -162,6 +163,10 @@ Re-theme by changing the token values there, keeping every text pair at
   in memory on the open view only, and read-only viewers get none). A later
   feature that changes a map — recolour, reparent, collapse — follows the
   same rule: record first, then mutate.
+- A main idea's colour is set through `setColor` in `map-model.js` (record
+  `'change colour'` first), and a new main idea picks its colour through
+  `pickFreeColor`: the first colour no main idea uses, else the first
+  unused on its side, else the rotation.
 - A map is one JSONB document (`{ v: 1, nodes: [...] }`), validated by
   `public/js/map-model.js` on both sides — the page and `server.js`
   require the same file, so never fork the validation.
