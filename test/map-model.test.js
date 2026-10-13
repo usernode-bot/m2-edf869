@@ -156,7 +156,7 @@ test('reparent works on the example map and the result still validates', () => {
   assert.equal(M.validate(doc), null);
 });
 
-const { demoMaps, sharedDemoDoc } = require('../server/demo-maps');
+const { demoMaps, sharedDemoDoc, lisbonDoc } = require('../server/demo-maps');
 
 const DIRS = ['left', 'right', 'up', 'down'];
 
@@ -381,6 +381,49 @@ test('with all colours used, the pick goes to the idea’s own side first', () =
   assert.equal(M.pickFreeColor(doc, 1), 9); // unused on the right side
   // ...and the left side is missing none of them, so the rotation answers.
   assert.equal(M.pickFreeColor(doc, -1), list.length % M.COLORS);
+});
+
+// ---- Find (#23): search over idea text and link names ----
+
+test('search finds ideas in tree order, folded and caseless', () => {
+  const doc = lisbonDoc();
+  // 'tram' meets Tram 28 (a child of Transit) and the tram day pass idea,
+  // walking depth-first under Transit.
+  const tram = M.search(doc, 'tram');
+  assert.deepEqual(tram.map((r) => r.id), ['c2', 'c4']);
+  tram.forEach((r) => assert.deepEqual(r, { kind: 'idea', id: r.id, field: 'text' }));
+  // Diacritics and case fold away: Cafe, CAFÉ, belem.
+  const cafe = M.search(doc, 'cafe');
+  assert.deepEqual(cafe.map((r) => r.id), ['a3']);
+  assert.deepEqual(M.search(doc, 'CAFÉ').map((r) => r.id), ['a3']);
+  assert.deepEqual(M.search(doc, 'belem').map((r) => r.id), ['b2']);
+});
+
+test('search finds a link by its name, and skips unnamed ones', () => {
+  const doc = lisbonDoc();
+  const arrive = M.search(doc, 'arrive');
+  assert.deepEqual(arrive, [{ kind: 'link', id: 'l1', field: 'text' }]);
+  // An unnamed link has no name to match, ever.
+  doc.links.push({ id: 'l2', from: 'a1', to: 'b1', text: '' });
+  assert.deepEqual(M.search(doc, 'l2').length, 0);
+  assert.equal(M.search(doc, '').length, 0);
+  assert.equal(M.search(doc, '   ').length, 0);
+  assert.equal(M.search(doc, 'zzz').length, 0);
+});
+
+test('search walks depth-first: a later child precedes the next main idea', () => {
+  const { doc, a2 } = smallDoc();
+  const hits = M.search(doc, 'child');
+  // 'Left child' comes before 'Left child two' (its later sibling), and both
+  // before 'Right child' under the next main idea.
+  assert.deepEqual(hits.map((r) => r.id), [byText(doc, 'Left child').id, a2.id, byText(doc, 'Right child').id]);
+});
+
+test('search changes nothing in the document', () => {
+  const doc = lisbonDoc();
+  const before = JSON.parse(JSON.stringify(doc));
+  M.search(doc, 'tram');
+  assert.deepEqual(doc, before);
 });
 
 test('setColor changes a main idea and refuses everything else', () => {

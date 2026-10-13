@@ -27,6 +27,9 @@
     redo: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>',
     minus: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>',
     minimap: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="12" y="10" width="6" height="6" rx="1"/></svg>',
+    search: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
+    chevronUp: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>',
+    chevronDown: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>',
     close: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>',
   };
 
@@ -56,6 +59,7 @@
       { keys: ['Mod', '-'], text: 'Zoom out' },
       { keys: ['F'], text: 'Focus on the selected branch' },
       { keys: ['C'], text: 'Center the selected idea' },
+      { keys: ['Mod', 'F'], text: 'Find in map, then Enter or Shift+Enter for the next or previous match' },
       { keys: ['?'], text: 'Open this sheet' },
     ] },
   ];
@@ -220,6 +224,16 @@
       shareBtn.addEventListener('click', opts.onShare);
       topRight.appendChild(shareBtn);
     }
+    // Find in map (#23), on every view: a read-only search that a viewer or
+    // a guest can use too.
+    var findBtn = el('button', 'btn-secondary btn-icon find-btn');
+    findBtn.type = 'button';
+    findBtn.setAttribute('aria-label', 'Find in map');
+    findBtn.title = 'Find in map';
+    findBtn.appendChild(icon('search'));
+    findBtn.addEventListener('click', function () { openFind(); });
+    topRight.appendChild(findBtn);
+
     // The keyboard shortcuts sheet, one tap away on a wide screen. On a
     // phone the ? key still opens it from a hardware keyboard.
     var kbdBtn = el('button', 'btn-secondary btn-icon kbd-btn');
@@ -465,6 +479,7 @@
       // The caller saves; the canvas only redraws and reports.
       drawBranches();
       renderBar();
+      refreshFind(); // an open find re-marks against the new doc
       opts.onChange();
     }
 
@@ -585,6 +600,7 @@
       // Branch ends need the measured text widths, so draw after layout.
       requestAnimationFrame(drawBranches);
       drawBranchesSoon();
+      refreshFind(); // a rebuild drops the find marks; re-apply them
     }
 
     var branchFrame = 0;
@@ -2163,6 +2179,159 @@
       deleteItem.btn.addEventListener('click', openDelete);
     }
 
+    // ── Find (#23) ───────────────────────────────────────────────────────
+    // Search idea text and link names from a compact bar over the top bar.
+    // M.search answers the matches; the canvas only highlights and pans.
+    // Find never edits, so it never records, and it works the same on a
+    // read-only view.
+    var find = null;
+
+    function openFind() {
+      if (!find) {
+        var stale = rootEl.querySelector('.find-bar');
+        if (stale) stale.remove(); // a closed find leaves its bar behind
+        var bar = el('div', 'find-bar');
+        bar.appendChild(icon('search'));
+        var input = el('input', 'find-input');
+        input.type = 'search';
+        input.setAttribute('aria-label', 'Find in map');
+        input.setAttribute('placeholder', 'Find in map');
+        input.setAttribute('autocomplete', 'off');
+        input.setAttribute('enterkeyhint', 'search');
+        bar.appendChild(input);
+        var count = el('span', 'find-count');
+        count.setAttribute('aria-live', 'polite');
+        bar.appendChild(count);
+        var prevBtn = el('button', 'find-step');
+        prevBtn.type = 'button';
+        prevBtn.setAttribute('aria-label', 'Previous match');
+        prevBtn.appendChild(icon('chevronUp'));
+        var nextBtn = el('button', 'find-step');
+        nextBtn.type = 'button';
+        nextBtn.setAttribute('aria-label', 'Next match');
+        nextBtn.appendChild(icon('chevronDown'));
+        var closeBtn = el('button', 'find-step');
+        closeBtn.type = 'button';
+        closeBtn.setAttribute('aria-label', 'Close find');
+        closeBtn.appendChild(icon('close'));
+        bar.appendChild(prevBtn);
+        bar.appendChild(nextBtn);
+        bar.appendChild(closeBtn);
+        rootEl.appendChild(bar);
+        find = { bar: bar, input: input, count: count, prev: prevBtn, next: nextBtn, query: '', matches: [], index: 0 };
+        prevBtn.addEventListener('click', function () { goToMatch(find.index - 1); input.focus(); });
+        nextBtn.addEventListener('click', function () { goToMatch(find.index + 1); input.focus(); });
+        closeBtn.addEventListener('click', closeFind);
+        input.addEventListener('input', onFindInput);
+        input.addEventListener('keydown', onFindKey);
+      }
+      cancelLink();
+      find.bar.hidden = false;
+      find.input.focus();
+      find.input.select();
+    }
+
+    function onFindInput() {
+      find.matches = M.search(d, find.input.value);
+      find.index = 0;
+      if (find.matches.length) goToMatch(0);
+      else applyFind(); // no matches: clear the marks, say so, dim nothing
+    }
+
+    function onFindKey(e) {
+      e.stopPropagation(); // the canvas hears none of the field's keys
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        goToMatch(find.index + (e.shiftKey ? -1 : 1));
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        closeFind();
+      } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault(); // already open: keep the field and its text
+      }
+    }
+
+    // Marks: matches ring and everything else dims; the current link match
+    // is outlined (an idea's current match is simply the selected one).
+    function clearFindMarks() {
+      rootEl.classList.remove('is-finding');
+      els.forEach(function (b) { b.classList.remove('is-match'); });
+      linkEls.forEach(function (b) { b.classList.remove('is-match', 'is-current'); });
+    }
+
+    function updateCount() {
+      if (!find) return;
+      var n = find.matches.length;
+      find.count.textContent = !find.input.value.trim() ? ''
+        : n ? (find.index + 1) + ' of ' + n : 'No matches';
+      find.prev.disabled = !n;
+      find.next.disabled = !n;
+    }
+
+    function applyFind() {
+      clearFindMarks();
+      updateCount();
+      if (!find || !find.matches.length) return;
+      rootEl.classList.add('is-finding');
+      find.matches.forEach(function (m) {
+        var b = m.kind === 'idea' ? els.get(m.id) : linkEls.get(m.id);
+        if (b) b.classList.add('is-match');
+      });
+      var cur = find.matches[find.index];
+      if (cur && cur.kind === 'link') {
+        var b = linkEls.get(cur.id);
+        if (b) b.classList.add('is-current');
+      }
+    }
+
+    function goToMatch(i) {
+      if (!find || !find.matches.length) return;
+      var n = find.matches.length;
+      find.index = ((i % n) + n) % n; // Enter and Shift+Enter wrap both ways
+      var m = find.matches[find.index];
+      applyFind();
+      if (m.kind === 'idea') {
+        select(m.id); // the selection ring marks the current match
+        revealIdea(m.id, true);
+      } else {
+        // A named link: bring its label on the paper, and leave the idea
+        // selection alone.
+        var l = null;
+        M.links(d).forEach(function (x) { if (x.id === m.id) l = x; });
+        var seg = l && linkSegment(l);
+        var b = linkEls.get(m.id);
+        if (seg && b) {
+          reveal(seg.mid[0], seg.mid[1], true, b.offsetWidth / scale, b.offsetHeight / scale);
+        }
+      }
+    }
+
+    function closeFind() {
+      if (!find) return;
+      find.bar.hidden = true;
+      clearFindMarks();
+      find = null;
+      focusIdea(selectedId); // the last match stays selected
+    }
+
+    // The doc changed under an open find: re-run the search, keep the
+    // current match when it still matches, else clamp; re-mark, no panning.
+    function refreshFind() {
+      if (!find) return;
+      var cur = find.matches[find.index];
+      find.matches = M.search(d, find.input.value);
+      var keep = -1;
+      for (var i = 0; i < find.matches.length; i++) {
+        if (cur && find.matches[i].kind === cur.kind && find.matches[i].id === cur.id) {
+          keep = i;
+          break;
+        }
+      }
+      find.index = keep !== -1 ? keep : Math.min(find.index, find.matches.length - 1);
+      if (find.index < 0) find.index = 0;
+      applyFind();
+    }
+
     // ── Keyboard ─────────────────────────────────────────────────────────
     // The whole map is reachable from the keys (#15): the arrows walk the
     // tree by way of M.nextIdea, Tab grows the selected idea and Enter adds
@@ -2185,6 +2354,7 @@
         if (key === '0') { fit(true); e.preventDefault(); return; }
         if (key === '=' || key === '+') { zoomBy(1.25); e.preventDefault(); return; }
         if (key === '-') { zoomBy(0.8); e.preventDefault(); return; }
+        if (key.toLowerCase() === 'f' && !e.shiftKey) { openFind(); e.preventDefault(); return; }
       }
 
       // A key on a bar's or the menu's own button is that button's: Enter
@@ -2368,7 +2538,10 @@
 
       if (key === 'Escape') {
         // With a menu open, Escape only closes the menu (the kit's dismissal).
-        if (!menu) {
+        if (find) {
+          closeFind(); // the open find closes first, before the selection
+          e.preventDefault();
+        } else if (!menu) {
           select(null);
           focusIdea(null); // back to the paper
         }

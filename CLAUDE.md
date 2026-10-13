@@ -216,3 +216,6 @@ Re-theme by changing the token values there, keeping every text pair at
   in the menu, and Alt+arrows all go through `reparent`/`moveSibling` in
   `public/js/map-model.js`; a move returns an undo record for `undoMove`,
   and links (`doc.links`) are never touched by a move.
+- Find goes through `M.search` in `map-model.js`: a new searchable field
+  (notes) is added there. A future collapse feature expands a match's
+  ancestors in `goToMatch` in `public/js/canvas.js`.
