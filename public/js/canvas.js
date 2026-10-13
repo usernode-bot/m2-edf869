@@ -9,9 +9,9 @@
   var M = root.M2Model;
   var doc = null; // set per view, below
 
-  var COLOR_CLASSES = ['c-teal', 'c-amber', 'c-violet', 'c-rose', 'c-sky'];
-  var DOT_CLASSES = ['b-teal', 'b-amber', 'b-violet', 'b-rose', 'b-sky'];
-  var COLOR_NAMES = ['teal', 'amber', 'violet', 'rose', 'sky'];
+  var COLOR_CLASSES = ['c-teal', 'c-amber', 'c-violet', 'c-rose', 'c-sky', 'c-green', 'c-orange', 'c-indigo', 'c-pink', 'c-slate'];
+  var DOT_CLASSES = ['b-teal', 'b-amber', 'b-violet', 'b-rose', 'b-sky', 'b-green', 'b-orange', 'b-indigo', 'b-pink', 'b-slate'];
+  var COLOR_NAMES = ['Teal', 'Amber', 'Violet', 'Rose', 'Sky', 'Green', 'Orange', 'Indigo', 'Pink', 'Slate'];
 
   var ICONS = {
     grid: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>',
@@ -301,12 +301,15 @@
     // the central one) with the four things you can do to it. Its handlers
     // act on selNode(), which is this idea because select(id) ran first.
     var menu = null; // { id, handle } while a menu is open
+    var colourPop = null; // the Colour panel's handle, while it is open
     var menuClosed = { id: null, at: 0 }; // a menu this same press may have closed
 
     function openMenu(id) {
       if (readOnly || id === 'root' || linkingFrom) return;
       if (!M.node(d, id) || !els.get(id)) return;
       closeMenu();
+      var n = M.node(d, id);
+      var isMain = n.parent === 'root';
       var p = un.popover({
         anchorEl: els.get(id),
         items: [
@@ -314,6 +317,7 @@
           { label: 'Add idea', disabled: M.ideaCount(d) >= M.MAX_NODES || !M.canAddUnder(d, id), handler: openAdd },
           { label: 'Link', disabled: M.links(d).length >= M.MAX_LINKS, handler: startLink },
           { label: 'Move to…', disabled: M.validParents(d, id).length === 0, handler: function () { openMoveTo(id); } },
+          { label: 'Colour', disabled: !isMain, handler: function () { openColour(id); } },
           { label: 'Delete', destructive: true, handler: openDelete },
         ],
       });
@@ -326,6 +330,52 @@
 
     function closeMenu() {
       if (menu) { menu.handle.dismiss(); menu = null; }
+      if (colourPop) { colourPop.dismiss(); colourPop = null; }
+    }
+
+    // The Colour panel (#20): the palette as a grid of swatches, opened from
+    // a main idea's menu. Tapping one recolours the whole branch — the pill's
+    // outline, the branch line, its ideas' underlines — then closes the
+    // panel; tapping the branch's own colour just closes it.
+    function openColour(id) {
+      var n = M.node(d, id);
+      if (readOnly || !n || n.parent !== 'root' || !els.get(id)) return;
+      closeMenu();
+      var cur = n.color == null ? 0 : n.color;
+      var grid = el('div', 'colour-grid');
+      var handle = null;
+      for (var i = 0; i < M.COLORS; i++) {
+        (function (i) {
+          var sw = el('button', 'swatch');
+          sw.type = 'button';
+          var disc = el('span', 'swatch-disc ' + DOT_CLASSES[i]);
+          sw.appendChild(disc);
+          sw.setAttribute('aria-label', COLOR_NAMES[i]);
+          if (i === cur) {
+            sw.classList.add('is-selected');
+            disc.appendChild(icon('check'));
+          }
+          sw.addEventListener('click', function () {
+            if (handle) handle.dismiss();
+            if (i === cur) return; // the same colour is no edit
+            var entry = record('change colour');
+            if (!M.setColor(d, id, i)) { unrecord(entry); return; }
+            render();
+            select(id);
+            commit();
+          });
+          grid.appendChild(sw);
+        })(i);
+      }
+      // contentEl mode returns { dismiss, el }, not a Promise; onDismiss
+      // clears the handle whether it closed itself or closeMenu did.
+      handle = un.popover({
+        anchorEl: els.get(id),
+        title: 'Colour',
+        contentEl: grid,
+        onDismiss: function () { if (colourPop === handle) colourPop = null; },
+      });
+      colourPop = handle;
     }
 
     function commit() {
@@ -496,7 +546,7 @@
           var ddep = M.depth(d, editing.parentId) + 1;
           var dw = ddep === 1 ? 'w1' : ddep === 2 ? 'w2' : 'w3';
           var dc = editing.parentId === 'root'
-            ? M.childrenOf(d, 'root').length % M.COLORS
+            ? M.pickFreeColor(d, editing.x >= 0 ? 1 : -1)
             : M.branchColor(d, editing.parentId);
           var dmx = (ds[0] + editing.x) / 2;
           paths += '<path class="' + dw + ' ' + COLOR_CLASSES[dc == null ? 0 : dc] +
