@@ -696,6 +696,34 @@
     return null;
   }
 
+  // Find (#23): a query folded to lowercase without diacritics, so 'Cafe'
+  // meets 'Café' and 'BELEM' meets 'Belém'.
+  function fold(s) {
+    return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  }
+
+  // Every place a trimmed query matches, in reading order: ideas depth-first
+  // from the centre, then the named links in doc order. One result per idea
+  // (its text); an unnamed link has nothing to match. Find never edits, so
+  // the doc comes back untouched.
+  function search(doc, query) {
+    var q = fold(query).trim();
+    if (!q) return [];
+    var out = [];
+    (function walk(pid) {
+      childrenOf(doc, pid).forEach(function (n) {
+        if (fold(n.text).indexOf(q) !== -1) out.push({ kind: 'idea', id: n.id, field: 'text' });
+        walk(n.id);
+      });
+    })('root');
+    links(doc).forEach(function (l) {
+      if (l.text && fold(l.text).indexOf(q) !== -1) {
+        out.push({ kind: 'link', id: l.id, field: 'text' });
+      }
+    });
+    return out;
+  }
+
   return {
     MAX_NODES: MAX_NODES,
     MAX_TEXT: MAX_TEXT,
@@ -741,6 +769,7 @@
     removeLink: removeLink,
     removeLinksFor: removeLinksFor,
     restoreLinks: restoreLinks,
+    search: search,
     snapshot: snapshot,
     replaceWith: replaceWith,
     validate: validate,
