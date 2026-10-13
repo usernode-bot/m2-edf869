@@ -225,3 +225,9 @@ Re-theme by changing the token values there, keeping every text pair at
 - Find goes through `M.search` in `map-model.js`: a new searchable field
   (notes) is added there. A future collapse feature expands a match's
   ancestors in `goToMatch` in `public/js/canvas.js`.
+- Deleting a map soft-deletes it: `maps.deleted_at` is set (from `req.now`),
+  and every map route filters `AND deleted_at IS NULL` so a trashed map
+  answers 404 for everyone, exactly like a missing one. It is kept 30 days
+  (`GET /api/trash`, `POST /api/maps/:id/restore`,
+  `DELETE /api/maps/:id/permanent`); the purge runs at boot and hourly and
+  uses real time (SQL `now()`), never `req.now`.

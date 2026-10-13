@@ -8,7 +8,7 @@ const jwt = require('jsonwebtoken');
 // UMD, so the browser loads it as window.M2Model and the server requires it.
 const M2Model = require('./public/js/map-model');
 const { exampleDoc } = require('./public/js/example-map');
-const { demoMaps, sharedDemoDoc } = require('./server/demo-maps');
+const { demoMaps, sharedDemoDoc, trashedDemoDoc } = require('./server/demo-maps');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -214,6 +214,14 @@ async function bootSchema() {
     -- a tab or device holding an older copy is refused instead of
     -- overwriting a newer one (#12).
     ALTER TABLE maps ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 0;
+
+    -- A deleted map waits here for 30 days (Recently deleted, #30) before
+    -- the hourly purge removes it for good. NULL means active: every read
+    -- and write route filters deleted_at IS NULL, so a trashed map answers
+    -- 404 for everyone, its owner included, until it is restored.
+    ALTER TABLE maps ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+    CREATE INDEX IF NOT EXISTS maps_deleted
+      ON maps (owner_id, deleted_at) WHERE deleted_at IS NOT NULL;
   `);
   if (IS_STAGING) {
     // A fixed "Anyone with the link" map owned by a fake person, so the
@@ -224,6 +232,16 @@ async function bootSchema() {
        VALUES ('demo-shared-link', $1, $2, $3, $4, now(), now(), 'link', 'staging-demo-link')
        ON CONFLICT (id) DO NOTHING`,
       [DEMO_FRIEND, doc.nodes[0].text, JSON.stringify(doc), doc.nodes.length]
+    );
+    // A fake person's map trashed 31 days ago, so the boot purge below can
+    // be seen removing it: the acceptance check that anything past 30 days
+    // disappears. Staging only.
+    const expired = trashedDemoDoc();
+    await pool.query(
+      `INSERT INTO maps (id, owner_id, title, doc, idea_count, created_at, updated_at, deleted_at)
+       VALUES ('demo-expired-trash', $1, $2, $3, $4, now(), now(), now() - interval '31 days')
+       ON CONFLICT (id) DO NOTHING`,
+      [DEMO_FRIEND, expired.nodes[0].text, JSON.stringify(expired), expired.nodes.length]
     );
   }
 }
@@ -275,7 +293,7 @@ app.get('/api/maps', async (req, res) => {
   try {
     if (!req.user) {
       // Guests can look around the example map, but nothing is kept.
-      return res.json({ maps: [], guest: true, welcomed: true, demo: false });
+      return res.json({ maps: [], guest: true, welcomed: true, demo: false, trashed: 0 });
     }
     const demo = IS_STAGING && req.query.demo === '1';
     const ownerId = String(req.user.id);
@@ -325,17 +343,38 @@ app.get('/api/maps', async (req, res) => {
          VALUES ($1, $2, $3, $4, $5) ON CONFLICT (map_id, user_id) DO NOTHING`,
         [sharedId, ownerId, String(req.user.username || ''), DEMO_FRIEND, req.now]
       );
+      // One of the viewer's own maps already in Recently deleted, deleted 18
+      // days ago, so the trash can be seen without deleting anything first.
+      // Idempotent on every ?demo=1 load, so restoring it or deleting it for
+      // good sticks until the next demo visit.
+      const trashed = trashedDemoDoc();
+      await pool.query(
+        `INSERT INTO maps (id, owner_id, title, doc, idea_count, created_at, updated_at, deleted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $6, $7) ON CONFLICT (id) DO NOTHING`,
+        ['demo-trash-' + ownerId, ownerId, trashed.nodes[0].text, JSON.stringify(trashed),
+          trashed.nodes.length, new Date(req.now.getTime() - 19 * 86400000),
+          new Date(req.now.getTime() - 18 * 86400000)]
+      );
     }
     const rows = await pool.query(
-      `SELECT ${MAP_COLUMNS} FROM maps WHERE owner_id = $1 ORDER BY updated_at DESC`,
+      `SELECT ${MAP_COLUMNS} FROM maps
+       WHERE owner_id = $1 AND deleted_at IS NULL ORDER BY updated_at DESC`,
       [ownerId]
     );
     // Maps other people added this person to, never their own.
     const shared = await pool.query(
       `SELECT m.id, m.title, m.doc, m.idea_count, m.created_at, m.updated_at, r.shared_by
        FROM map_readers r JOIN maps m ON m.id = r.map_id
-       WHERE r.user_id = $1 AND m.owner_id <> $1
+       WHERE r.user_id = $1 AND m.owner_id <> $1 AND m.deleted_at IS NULL
        ORDER BY m.updated_at DESC`,
+      [ownerId]
+    );
+    // How many of the caller's maps are in Recently deleted right now: the
+    // row at the bottom of Your maps only shows when there is something in.
+    const trashedCount = await pool.query(
+      `SELECT count(*)::int AS n FROM maps
+       WHERE owner_id = $1 AND deleted_at IS NOT NULL
+         AND deleted_at > now() - interval '30 days'`,
       [ownerId]
     );
     const welcomed = await pool.query('SELECT 1 FROM profiles WHERE user_id = $1', [ownerId]);
@@ -344,6 +383,7 @@ app.get('/api/maps', async (req, res) => {
       shared: shared.rows.map(row => Object.assign(mapSummary(row), { sharedBy: row.shared_by })),
       welcomed: welcomed.rowCount > 0,
       demo,
+      trashed: trashedCount.rows[0].n,
     });
   } catch (err) {
     console.error('GET /api/maps failed: ' + err.message);
@@ -421,7 +461,7 @@ app.get('/api/maps/:id', async (req, res) => {
     const userId = String(req.user.id);
     const row = await pool.query(
       `SELECT ${MAP_COLUMNS}, owner_id FROM maps m
-       WHERE id = $1 AND (owner_id = $2 OR visibility = 'public'
+       WHERE m.id = $1 AND m.deleted_at IS NULL AND (m.owner_id = $2 OR m.visibility = 'public'
          OR EXISTS (SELECT 1 FROM map_readers r WHERE r.map_id = m.id AND r.user_id = $2))`,
       [req.params.id, userId]
     );
@@ -453,14 +493,15 @@ app.put('/api/maps/:id', async (req, res) => {
     const updated = await pool.query(
       `UPDATE maps SET doc = $3, title = $4, idea_count = $5, updated_at = $6,
          revision = revision + 1
-       WHERE id = $1 AND owner_id = $2 AND ($7::int IS NULL OR revision = $7)
+       WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
+         AND ($7::int IS NULL OR revision = $7)
        RETURNING revision, updated_at`,
       [req.params.id, ownerId, JSON.stringify(doc), doc.nodes[0].text.trim(),
         doc.nodes.length, req.now, base === undefined ? null : base]
     );
     if (!updated.rowCount) {
       const current = await pool.query(
-        'SELECT doc, revision FROM maps WHERE id = $1 AND owner_id = $2',
+        'SELECT doc, revision FROM maps WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL',
         [req.params.id, ownerId]
       );
       if (!current.rowCount) return res.status(404).json({ error: 'Map not found' });
@@ -478,11 +519,15 @@ app.put('/api/maps/:id', async (req, res) => {
   }
 });
 
+// Deleting a map moves it to Recently deleted (#30): the row stays, its
+// readers and sharing with it, and every other route stops answering as if
+// it did not exist. Only the purge or Delete now really removes it.
 app.delete('/api/maps/:id', async (req, res) => {
   try {
     const deleted = await pool.query(
-      'DELETE FROM maps WHERE id = $1 AND owner_id = $2',
-      [req.params.id, String(req.user.id)]
+      `UPDATE maps SET deleted_at = $3
+       WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL`,
+      [req.params.id, String(req.user.id), req.now]
     );
     if (!deleted.rowCount) return res.status(404).json({ error: 'Map not found' });
     return res.status(204).end();
@@ -491,6 +536,89 @@ app.delete('/api/maps/:id', async (req, res) => {
     return res.status(500).json({ error: 'Could not delete the map' });
   }
 });
+
+// ── Recently deleted (#30) ───────────────────────────────────────────────
+// The owner's trashed maps, kept 30 days from when they were deleted. Real
+// time throughout: the purge and the countdown are data lifecycle, not
+// something a staging preview clock should move.
+const TRASH_DAYS = 30;
+const TRASH_MS = TRASH_DAYS * 86400000;
+
+function daysLeft(deletedAt) {
+  const ms = deletedAt.getTime() + TRASH_MS - Date.now();
+  return Math.min(TRASH_DAYS, Math.max(1, Math.ceil(ms / 86400000)));
+}
+
+app.get('/api/trash', async (req, res) => {
+  try {
+    if (!req.user) return res.json({ maps: [] });
+    const rows = await pool.query(
+      `SELECT ${MAP_COLUMNS}, deleted_at FROM maps
+       WHERE owner_id = $1 AND deleted_at IS NOT NULL
+         AND deleted_at > now() - interval '30 days'
+       ORDER BY deleted_at DESC`,
+      [String(req.user.id)]
+    );
+    return res.json({
+      maps: rows.rows.map(row => Object.assign(mapSummary(row), {
+        deletedAt: row.deleted_at.toISOString(),
+        daysLeft: daysLeft(row.deleted_at),
+      })),
+    });
+  } catch (err) {
+    console.error('GET /api/trash failed: ' + err.message);
+    return res.status(500).json({ error: 'Could not load Recently deleted' });
+  }
+});
+
+app.post('/api/maps/:id/restore', async (req, res) => {
+  try {
+    const restored = await pool.query(
+      `UPDATE maps SET deleted_at = NULL
+       WHERE id = $1 AND owner_id = $2 AND deleted_at IS NOT NULL
+         AND deleted_at > now() - interval '30 days'
+       RETURNING ${MAP_COLUMNS}`,
+      [req.params.id, String(req.user.id)]
+    );
+    if (!restored.rowCount) return res.status(404).json({ error: 'Map not found' });
+    return res.json({ map: mapSummary(restored.rows[0]) });
+  } catch (err) {
+    console.error('POST /api/maps/:id/restore failed: ' + err.message);
+    return res.status(500).json({ error: 'Could not restore the map' });
+  }
+});
+
+// Delete now, from Recently deleted. Only a map already in the trash can be
+// removed here, so an active map can never be destroyed through this route.
+app.delete('/api/maps/:id/permanent', async (req, res) => {
+  try {
+    const deleted = await pool.query(
+      'DELETE FROM maps WHERE id = $1 AND owner_id = $2 AND deleted_at IS NOT NULL',
+      [req.params.id, String(req.user.id)]
+    );
+    if (!deleted.rowCount) return res.status(404).json({ error: 'Map not found' });
+    return res.status(204).end();
+  } catch (err) {
+    console.error('DELETE /api/maps/:id/permanent failed: ' + err.message);
+    return res.status(500).json({ error: 'Could not delete the map for good' });
+  }
+});
+
+// The hourly clean-up: anything trashed more than 30 days ago is gone for
+// good, readers and all. Runs once at boot, then every hour; a failure is
+// logged and retried an hour later, never crashing the process.
+async function purgeTrash() {
+  try {
+    const gone = await pool.query(
+      `DELETE FROM maps WHERE deleted_at < now() - interval '30 days'`
+    );
+    if (gone.rowCount > 0) {
+      console.log(`Purged ${gone.rowCount} maps deleted over ${TRASH_DAYS} days ago`);
+    }
+  } catch (err) {
+    console.warn('purgeTrash failed: ' + err.message);
+  }
+}
 
 // ── Sharing ──────────────────────────────────────────────────────────────
 // A map is Private (NULL or 'private': its owner and the people they add),
@@ -512,7 +640,7 @@ function newShareToken() {
 async function ownedMap(id, userId) {
   if (!userId) return null;
   const row = await pool.query(
-    'SELECT id, visibility, share_token FROM maps WHERE id = $1 AND owner_id = $2',
+    'SELECT id, visibility, share_token FROM maps WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL',
     [id, userId]
   );
   return row.rows[0] || null;
@@ -552,7 +680,8 @@ app.get('/api/shared/:token', async (req, res) => {
     const token = req.params.token;
     if (!token || token.length > 64) return res.json({ map: null });
     const row = await pool.query(
-      `SELECT ${MAP_COLUMNS}, owner_id FROM maps WHERE share_token = $1 AND visibility = 'link'`,
+      `SELECT ${MAP_COLUMNS}, owner_id FROM maps
+       WHERE share_token = $1 AND visibility = 'link' AND deleted_at IS NULL`,
       [token]
     );
     if (!row.rowCount) return res.json({ map: null });
@@ -586,7 +715,8 @@ app.put('/api/maps/:id/sharing', async (req, res) => {
     const updated = await pool.query(
       `UPDATE maps SET visibility = $3,
          share_token = CASE WHEN $3 = 'link' THEN COALESCE(share_token, $4) ELSE NULL END
-       WHERE id = $1 AND owner_id = $2 RETURNING id, visibility, share_token`,
+       WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
+       RETURNING id, visibility, share_token`,
       [req.params.id, String(req.user.id), visibility, newShareToken()]
     );
     if (!updated.rowCount) return res.status(404).json({ error: 'Map not found' });
@@ -603,7 +733,7 @@ app.post('/api/maps/:id/sharing/link', async (req, res) => {
     const userId = String(req.user.id);
     const updated = await pool.query(
       `UPDATE maps SET share_token = $3
-       WHERE id = $1 AND owner_id = $2 AND visibility = 'link'
+       WHERE id = $1 AND owner_id = $2 AND visibility = 'link' AND deleted_at IS NULL
        RETURNING id, visibility, share_token`,
       [req.params.id, userId, newShareToken()]
     );
@@ -766,6 +896,11 @@ app.get('*', (req, res) => {
 
 async function start() {
   await bootSchema();
+  // The trash clean-up runs once now (which also shows the staging seed of a
+  // 31-day-old map going), then every hour. Unref'd so it never holds the
+  // process open on shutdown.
+  purgeTrash();
+  setInterval(purgeTrash, 60 * 60 * 1000).unref();
   const server = app.listen(port, () => console.log(`Listening on :${port}`));
   // Let Envoy retire idle upstream connections at 60s, with a 15s margin.
   server.keepAliveTimeout = 75_000;

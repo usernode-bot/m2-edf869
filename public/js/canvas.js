@@ -1952,10 +1952,9 @@
       var n = selNode();
       if (!n) return;
       if (n.id === 'root') {
-        var count = M.ideaCount(d) - 1;
         un.alert({
           title: 'Delete ' + d.nodes[0].text.trim() + '?',
-          message: 'This deletes the map and its ' + count + ' ideas.',
+          message: 'It stays in Recently deleted for 30 days.',
           buttons: [
             { label: 'Cancel', style: 'cancel' },
             { label: 'Delete', style: 'destructive', handler: function () { opts.onDeleteMap(); } },
