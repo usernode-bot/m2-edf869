@@ -25,6 +25,11 @@
       "expectText": "Lisbon weekend"
     },
     {
+      "name": "map.demo-undo",
+      "path": "/?demo=1",
+      "expectSelector": ".topbar .undo-btn"
+    },
+    {
       "name": "map.demo-maps-list",
       "path": "/?demo=1#/maps",
       "expectText": "Staging demo maps"

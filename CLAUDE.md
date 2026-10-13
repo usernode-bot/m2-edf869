@@ -157,6 +157,11 @@ Re-theme by changing the token values there, keeping every text pair at
 
 ## App-specific conventions
 
+- Every edit path in `public/js/canvas.js` calls `record(label)` before it
+  mutates the doc, so the change can be undone and redone (the history lives
+  in memory on the open view only, and read-only viewers get none). A later
+  feature that changes a map — recolour, reparent, collapse — follows the
+  same rule: record first, then mutate.
 - A map is one JSONB document (`{ v: 1, nodes: [...] }`), validated by
   `public/js/map-model.js` on both sides — the page and `server.js`
   require the same file, so never fork the validation.
