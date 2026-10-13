@@ -46,7 +46,30 @@ function buildDoc(title, branches) {
     return id;
   };
   branches.forEach(b => add('root', b));
+  M2Model.layout(doc); // built maps come out tidy, though not kept tidy
   return doc;
+}
+
+// Garden plan, hand-laid to start messy the way a map grows before Tidy up:
+// Tools' pill sits over Vegetables' ideas, New trowel lies on Lettuce, and
+// Seasons drifted left with its ideas pointing back at the centre.
+function gardenDoc() {
+  return {
+    v: 1,
+    nodes: [
+      { id: 'root', parent: null, text: 'Garden plan', x: 0, y: 0 },
+      { id: 'g1', parent: 'root', text: 'Vegetables', x: 120, y: -120, color: 0 },
+      { id: 'g2', parent: 'g1', text: 'Tomatoes', x: 200, y: -170 },
+      { id: 'g3', parent: 'g1', text: 'Lettuce', x: 200, y: -110 },
+      { id: 'g4', parent: 'root', text: 'Tools', x: 185, y: -135, color: 2 },
+      { id: 'g5', parent: 'g4', text: 'New trowel', x: 200, y: -110 },
+      { id: 'g6', parent: 'root', text: 'Flowers', x: -140, y: -40, color: 1 },
+      { id: 'g7', parent: 'g6', text: 'Roses', x: -220, y: -40 },
+      { id: 'g8', parent: 'root', text: 'Seasons', x: -160, y: 60, color: 3 },
+      { id: 'g9', parent: 'g8', text: 'Spring sowing', x: -90, y: 40 },
+      { id: 'g10', parent: 'g8', text: 'Autumn pruning', x: -90, y: 100 },
+    ],
+  };
 }
 
 const KEYS = ['lisbon', 'thesis', 'offsite', 'garden', 'meals', 'kitchen', 'reading', 'spanish'];
@@ -71,12 +94,7 @@ function demoMaps(now) {
       ['People', ['Icebreakers', 'Teams']],
       ['Follow-up', ['Notes', 'Actions']],
     ]),
-    garden: buildDoc('Garden plan', [
-      ['Vegetables', ['Tomatoes', 'Lettuce']],
-      ['Flowers', ['Roses']],
-      ['Tools', ['New trowel']],
-      ['Seasons', ['Spring sowing', 'Autumn pruning']],
-    ]),
+    garden: gardenDoc(),
     meals: buildDoc('Weekly meals', [
       ['Weekdays', ['Pasta Monday']],
       ['Weekend', ['Big breakfast', 'Roast']],

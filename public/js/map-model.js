@@ -18,6 +18,11 @@
   // room left between an idea and the ideas under it.
   var MAX_IDEA_W = 236;
   var CHILD_GAP = 40;
+  // Tidy up (#18) spacing: centre pill to a main idea, between the ideas
+  // stacked under one parent, and between the main-idea blocks on one side.
+  var ROOT_GAP = 60;
+  var SIBLING_GAP = 16;
+  var MAIN_GAP = 24;
   // Links: named lines between any two ideas, outside the tree.
   var MAX_LINKS = 200;
   var MAX_LINK_TEXT = 60;
@@ -101,6 +106,19 @@
     var len = n.text ? n.text.length : 0;
     var w = isPill(doc, n.id) ? Math.ceil(len * 8.8) + 32 : Math.ceil(len * 7.4) + 4;
     return Math.min(w, MAX_IDEA_W);
+  }
+
+  // The size an idea draws, when no page has measured it: the width above,
+  // plus the pill or text height and one extra text line per wrap. The
+  // line heights are the page's CSS ones (28 root, 24 main, 20 outer).
+  function estimatedSize(doc, n) {
+    var len = n.text ? n.text.length : 0;
+    var pill = isPill(doc, n.id);
+    var raw = pill ? Math.ceil(len * 8.8) + 32 : Math.ceil(len * 7.4) + 4;
+    var lines = Math.max(1, Math.ceil(raw / MAX_IDEA_W));
+    if (n.id === 'root') return { w: Math.min(raw, MAX_IDEA_W), h: 52 + (lines - 1) * 28 };
+    if (pill) return { w: Math.min(raw, MAX_IDEA_W), h: 38 + (lines - 1) * 24 };
+    return { w: Math.min(raw, MAX_IDEA_W), h: 25 + (lines - 1) * 20 };
   }
 
   function trim(t) { return typeof t === 'string' ? t.trim() : ''; }
@@ -536,6 +554,7 @@
   function snapshot(doc) {
     var snap = { nodes: nodes(doc) };
     if (doc && doc.links) snap.links = doc.links;
+    if (doc && doc.layout) snap.layout = doc.layout;
     return JSON.stringify(snap);
   }
 
@@ -546,6 +565,8 @@
     doc.nodes = s.nodes;
     if (s.links) doc.links = s.links;
     else delete doc.links;
+    if (s.layout) doc.layout = s.layout;
+    else delete doc.layout;
   }
 
   // Remove every link touching any of the ideas in `ids`; returns copies.
@@ -586,6 +607,257 @@
     var ox = w / 2 - ((minX + maxX) / 2) * s;
     var oy = h / 2 - ((minY + maxY) / 2) * s;
     return function (x, y) { return [ox + x * s, oy + y * s]; };
+  }
+
+  // ── Tidy up (#18): one automatic layout ──────────────────────────────────
+  // A balanced mind map: the main ideas split right and left by their total
+  // subtree height, and each side is a horizontal tree — children stacked
+  // top to bottom, a parent centred on its stack. Pure: same doc in, same
+  // doc out, so tidying twice changes nothing the second time.
+
+  // Which ideas are hidden under a collapsed one (some strict ancestor has
+  // collapsed === true). A collapsed idea itself stays visible.
+  function hiddenUnder(byId, all) {
+    var hidden = {};
+    all.forEach(function (n) {
+      var cur = n;
+      while (cur && cur.parent != null) {
+        cur = byId[cur.parent];
+        if (!cur) break;
+        if (cur.collapsed === true) { hidden[n.id] = true; break; }
+      }
+    });
+    return hidden;
+  }
+
+  // Lay the whole map out. `measure(n)` gives an idea's drawn {w, h} when
+  // the page has measured it; the default is estimatedSize. Mutates the doc
+  // and returns whether any position or order changed.
+  function layout(doc, measure) {
+    var all = nodes(doc);
+    var root = null;
+    var i;
+    for (i = 0; i < all.length; i++) if (all[i].parent == null) root = all[i];
+    if (!root) return false;
+    var byId = {}, kids = {}, idx = {};
+    for (i = 0; i < all.length; i++) {
+      byId[all[i].id] = all[i];
+      idx[all[i].id] = i;
+      if (all[i].parent != null) {
+        if (!kids[all[i].parent]) kids[all[i].parent] = [];
+        kids[all[i].parent].push(all[i]);
+      }
+    }
+    var hidden = hiddenUnder(byId, all);
+    var sizeOf = typeof measure === 'function'
+      ? function (n) {
+          var s = measure(n);
+          return s && typeof s.w === 'number' && typeof s.h === 'number'
+            ? s
+            : estimatedSize(doc, n);
+        }
+      : function (n) { return estimatedSize(doc, n); };
+    var W = {}, H = {};
+    all.forEach(function (n) {
+      var s = sizeOf(n);
+      W[n.id] = typeof s.w === 'number' && isFinite(s.w) ? s.w : 80;
+      H[n.id] = typeof s.h === 'number' && isFinite(s.h) ? s.h : 30;
+    });
+    // Depth once per idea, for pill-ness.
+    var depthOf = {};
+    all.forEach(function (n) {
+      if (n.parent == null) { depthOf[n.id] = 0; return; }
+      var d = 0, cur = n;
+      while (cur && cur.parent != null) { d++; cur = byId[cur.parent]; }
+      depthOf[n.id] = cur ? d : -1;
+    });
+    // A parent's drawn children in stack order: by current y, ties by array
+    // position. Only the order is read, never a distance, so a second run
+    // reads the same order it wrote.
+    function stackOrder(pid) {
+      return (kids[pid] || [])
+        .filter(function (c) { return !hidden[c.id]; })
+        .sort(function (a, b) { return a.y - b.y || idx[a.id] - idx[b.id]; });
+    }
+    // Block heights, bottom-up: an idea fills at least its own height, else
+    // its children's stack plus the gap between them. A collapsed idea, like
+    // a leaf, is just its own height.
+    var blockH = {};
+    (function measureBlocks(n) {
+      var cs = stackOrder(n.id);
+      var sum = 0;
+      cs.forEach(function (c) { sum += measureBlocks(c); });
+      var h = H[n.id];
+      if (cs.length) h = Math.max(h, sum + SIBLING_GAP * (cs.length - 1));
+      blockH[n.id] = h;
+      return h;
+    })(root);
+    // The main sequence: right side (x >= 0) by y, then left side by y,
+    // ties by array position. The first k of it goes right, the rest left.
+    var seq = [];
+    [1, -1].forEach(function (side) {
+      stackOrder(root.id).forEach(function (m) {
+        if ((m.x >= 0 ? 1 : -1) === side) seq.push(m);
+      });
+    });
+    // Choose k to balance the two sides' total height, gaps counted; a tie
+    // takes the larger k, so one main idea goes right.
+    var k = seq.length;
+    if (seq.length > 1) {
+      var grand = 0;
+      seq.forEach(function (m) { grand += blockH[m.id]; });
+      grand += MAIN_GAP * (seq.length - 1);
+      var acc = 0, best = -1;
+      for (var kk = 1; kk < seq.length; kk++) {
+        acc += blockH[seq[kk - 1].id];
+        var leftSum = acc + MAIN_GAP * (kk - 1);
+        var diff = Math.abs(leftSum - (grand - leftSum));
+        if (best < 0 || diff <= best) { best = diff; k = kk; }
+      }
+    }
+    // Place top-down. Each side's stack is centred on the centre idea; a
+    // node sits in the middle of its own block, its children's stack centred
+    // on it, each a step further out from its parent.
+    var at = {};
+    at[root.id] = { x: 0, y: 0 };
+    var rootW = W[root.id];
+    function placeKids(n, side, gap) {
+      var cs = stackOrder(n.id);
+      if (!cs.length) return;
+      var total = 0;
+      cs.forEach(function (c) { total += blockH[c.id]; });
+      total += gap * (cs.length - 1);
+      var top = at[n.id].y - total / 2;
+      var step = childStep(W[n.id], depthOf[n.id] <= 1);
+      cs.forEach(function (c) {
+        at[c.id] = {
+          x: at[n.id].x + side * step,
+          y: top + blockH[c.id] / 2,
+        };
+        top += blockH[c.id] + gap;
+        placeKids(c, side, SIBLING_GAP);
+      });
+    }
+    [1, -1].forEach(function (side, si) {
+      var list = si === 0 ? seq.slice(0, k) : seq.slice(k);
+      if (!list.length) return;
+      var total = 0;
+      list.forEach(function (m) { total += blockH[m.id]; });
+      total += MAIN_GAP * (list.length - 1);
+      var top = -total / 2;
+      list.forEach(function (m) {
+        at[m.id] = {
+          x: side * (rootW / 2 + ROOT_GAP + W[m.id] / 2),
+          y: top + blockH[m.id] / 2,
+        };
+        top += blockH[m.id] + MAIN_GAP;
+        placeKids(m, side, SIBLING_GAP);
+      });
+    });
+    // Write it back. Hidden subtrees move rigidly with their nearest
+    // visible ancestor; every coordinate lands on a whole pixel.
+    var old = {};
+    all.forEach(function (n) { old[n.id] = [n.x, n.y]; });
+    var moved = false;
+    all.forEach(function (n) {
+      var p = at[n.id];
+      if (!p) return;
+      var x = Math.round(p.x), y = Math.round(p.y);
+      if (x !== n.x || y !== n.y) moved = true;
+      n.x = x;
+      n.y = y;
+    });
+    all.forEach(function (n) {
+      if (!hidden[n.id]) return;
+      var anc = byId[n.parent];
+      while (anc && hidden[anc.id]) anc = byId[anc.parent];
+      if (!anc || !at[anc.id]) return;
+      var dx = anc.x - old[anc.id][0];
+      var dy = anc.y - old[anc.id][1];
+      if (dx || dy) moved = true;
+      n.x = Math.round(old[n.id][0] + dx);
+      n.y = Math.round(old[n.id][1] + dy);
+    });
+    // Rewrite the array in pre-order — the centre first, then each idea's
+    // children in their new order — so the order kept is the order shown.
+    // A collapsed idea's hidden children keep their own order after it.
+    var order = [];
+    (function walk(n) {
+      order.push(n);
+      if (n === root) { seq.forEach(walk); return; }
+      var cs = kids[n.id] || [];
+      if (!cs.length) return;
+      if (n.collapsed === true || hidden[n.id]) cs.forEach(walk);
+      else stackOrder(n.id).forEach(walk);
+    })(root);
+    if (order.length === all.length) {
+      for (i = 0; i < all.length; i++) {
+        if (order[i] !== all[i]) { moved = true; doc.nodes = order; break; }
+      }
+    }
+    return moved;
+  }
+
+  // The first pair of drawn ideas whose boxes overlap, as [idA, idB], or
+  // null. Boxes as the page draws them: a pill centred on its anchor, an
+  // outer idea's text running from its anchor away from its parent. Ideas
+  // hidden under a collapsed idea are not drawn, so not checked.
+  function overlaps(doc, measure) {
+    var all = nodes(doc);
+    var byId = {};
+    all.forEach(function (n) { byId[n.id] = n; });
+    var hidden = hiddenUnder(byId, all);
+    var boxes = {}, ids = [];
+    all.forEach(function (n) {
+      if (hidden[n.id]) return;
+      var s = typeof measure === 'function' ? measure(n) : null;
+      if (!s || typeof s.w !== 'number' || typeof s.h !== 'number') s = estimatedSize(doc, n);
+      var x0;
+      if (n.parent == null || isPill(doc, n.id)) x0 = n.x - s.w / 2;
+      else {
+        var p = byId[n.parent];
+        x0 = p && n.x < p.x ? n.x - s.w : n.x;
+      }
+      boxes[n.id] = { x: x0, y: n.y - s.h / 2, w: s.w, h: s.h };
+      ids.push(n.id);
+    });
+    for (var i = 0; i < ids.length; i++) {
+      for (var j = i + 1; j < ids.length; j++) {
+        var a = boxes[ids[i]], b = boxes[ids[j]];
+        if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h) {
+          return [ids[i], ids[j]];
+        }
+      }
+    }
+    return null;
+  }
+
+  // Turn a main idea's branch to face outward again after it was dragged
+  // across the centre: when most of its direct children sit between it and
+  // the centre, mirror every descendant's x around it. Returns whether it
+  // flipped; any other idea is left alone.
+  function faceOutward(doc, id) {
+    var n = node(doc, id);
+    if (!n || n.parent !== 'root') return false;
+    var kids = childrenOf(doc, n.id);
+    if (!kids.length) return false;
+    var side = n.x >= 0 ? 1 : -1;
+    var inward = 0, outward = 0;
+    kids.forEach(function (c) {
+      var d = (c.x - n.x) * side;
+      if (d < 0) inward++;
+      else if (d > 0) outward++;
+    });
+    if (inward <= outward) return false;
+    subtree(doc, id).forEach(function (m) {
+      if (m !== n) m.x = 2 * n.x - m.x;
+    });
+    return true;
+  }
+
+  // Whether a map keeps itself tidy: every edit relays it out as it saves.
+  function isAutoLayout(doc) {
+    return !!(doc && doc.layout && doc.layout.auto);
   }
 
   // Reject an invalid doc with a reason, or return null when it is fine.
@@ -634,6 +906,13 @@
         if (++hops > doc.nodes.length) return 'cycle';
         if (hops > MAX_DEPTH) return 'too deep';
       }
+    }
+    // The optional layout marker (#18): absent is fine; if present, a plain
+    // object whose only key is the boolean `auto`.
+    if (doc.layout !== undefined) {
+      if (!doc.layout || typeof doc.layout !== 'object' || Array.isArray(doc.layout)) return 'bad layout';
+      var lkeys = Object.keys(doc.layout);
+      if (lkeys.length !== 1 || lkeys[0] !== 'auto' || typeof doc.layout.auto !== 'boolean') return 'bad layout';
     }
     return validateLinks(doc, byId);
   }
@@ -712,5 +991,10 @@
     snapshot: snapshot,
     replaceWith: replaceWith,
     validate: validate,
+    layout: layout,
+    estimatedSize: estimatedSize,
+    overlaps: overlaps,
+    faceOutward: faceOutward,
+    isAutoLayout: isAutoLayout,
   };
 });

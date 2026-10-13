@@ -25,6 +25,7 @@
     keyboard: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01"/><path d="M10 10h.01"/><path d="M14 10h.01"/><path d="M18 10h.01"/><path d="M7 14h10"/></svg>',
     undo: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>',
     redo: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>',
+    tidy: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8Z"/><path d="M19 15l.9 2.6L22 18.5l-2.1.9L19 22l-.9-2.6L16 18.5l2.1-.9Z"/></svg>',
   };
 
   // The keyboard shortcuts (#15), one table the sheet is drawn from, so the
@@ -43,7 +44,7 @@
     ] },
     { group: 'Move around', rows: [
       { keys: ['Arrows'], text: 'Move to the idea in that direction' },
-      { keys: ['Alt', 'Arrows'], text: 'Nudge the selected idea across the paper', edit: true },
+      { keys: ['Alt', 'Arrows'], text: 'Nudge the selected idea across the paper, when Keep tidy is off', edit: true },
       { keys: ['Mod', 'Alt', 'Arrows'], text: 'Reorder, promote or tuck the selected idea under its sibling', edit: true },
       { keys: ['Esc'], text: 'Close a menu or sheet, or clear the selection' },
     ] },
@@ -208,6 +209,17 @@
       shareBtn.addEventListener('click', opts.onShare);
       topRight.appendChild(shareBtn);
     }
+    // Tidy up (#18): one tap lays every branch out so nothing overlaps.
+    if (!readOnly) {
+      var tidyBtn = el('button', 'btn-secondary tidy-btn');
+      tidyBtn.type = 'button';
+      tidyBtn.setAttribute('aria-label', 'Tidy up');
+      tidyBtn.title = 'Tidy up';
+      tidyBtn.appendChild(icon('tidy'));
+      tidyBtn.appendChild(el('span', 'btn-label', 'Tidy up'));
+      tidyBtn.addEventListener('click', function () { tidy('Tidy up'); commit(); });
+      topRight.appendChild(tidyBtn);
+    }
     // The keyboard shortcuts sheet, one tap away on a wide screen. On a
     // phone the ? key still opens it from a hardware keyboard.
     var kbdBtn = el('button', 'btn-secondary btn-icon kbd-btn');
@@ -304,7 +316,28 @@
     var menuClosed = { id: null, at: 0 }; // a menu this same press may have closed
 
     function openMenu(id) {
-      if (readOnly || id === 'root' || linkingFrom) return;
+      if (readOnly || linkingFrom) return;
+      if (id === 'root') {
+        // The centre's menu is about the map itself (#18): rename, add, and
+        // the tidy controls. The other ideas keep their own menu below.
+        if (!els.get('root')) return;
+        closeMenu();
+        var rp = un.popover({
+          anchorEl: els.get('root'),
+          items: [
+            { label: 'Rename', handler: function () { openRename('root'); } },
+            { label: 'Add idea', disabled: M.ideaCount(d) >= M.MAX_NODES, handler: openAdd },
+            { label: 'Tidy up', handler: function () { tidy('Tidy up'); commit(); } },
+            { label: M.isAutoLayout(d) ? 'Turn off Keep tidy' : 'Turn on Keep tidy', handler: toggleKeepTidy },
+          ],
+        });
+        menu = { id: 'root', handle: rp };
+        rp.then(function () {
+          if (menu && menu.handle === rp) menu = null;
+          menuClosed = { id: 'root', at: performance.now() };
+        });
+        return;
+      }
       if (!M.node(d, id) || !els.get(id)) return;
       closeMenu();
       var p = un.popover({
@@ -328,11 +361,123 @@
       if (menu) { menu.handle.dismiss(); menu = null; }
     }
 
+    var tidyChecks = 0; // every commit bumps it; the tidy dev check reads it
+
     function commit() {
-      // The caller saves; the canvas only redraws and reports.
+      // The caller saves; the canvas only redraws and reports. A map kept
+      // tidy (#18) relayouts first, so every edit path stays tidy.
+      if (M.isAutoLayout(d) && !gesture) tidy();
+      tidyChecks++;
       drawBranches();
       renderBar();
       opts.onChange();
+    }
+
+    // ── Tidy up (#18) ────────────────────────────────────────────────────
+    var tidyAt = -1; // the tidyChecks value the last tidy that moved something owns
+    var tidyCheckAdded = false;
+
+    function registerTidyCheck() {
+      // Dev build only: after every tidy that moved something, re-check on
+      // resize that no two ideas still overlap. Reports idea ids only, never
+      // idea text. Never let a dev-only hook break a real tidy.
+      if (tidyCheckAdded) return;
+      var un2 = root.usernode;
+      if (!un2 || !un2.invariants || typeof un2.invariants.register !== 'function') return;
+      tidyCheckAdded = true;
+      try {
+        un2.invariants.register('tidy-leaves-no-overlap', function () {
+          if (tidyChecks !== tidyAt) return true; // edited since the tidy
+          var pair = M.overlaps(d, measureDom);
+          return pair ? 'ideas overlap after tidy: ' + pair[0] + ', ' + pair[1] : true;
+        });
+      } catch (e) { /* dev only */ }
+    }
+
+    function posOf(n) {
+      // While the tidy animation slides the boxes, the doc already holds the
+      // final positions, so anything that draws reads the live style first.
+      var b = els.get(n.id);
+      if (b) {
+        var x = parseFloat(b.style.left), y = parseFloat(b.style.top);
+        if (isFinite(x) && isFinite(y)) return [x, y];
+      }
+      return [n.x, n.y];
+    }
+
+    function measureDom(n) {
+      var b = els.get(n.id);
+      var w = b && b.offsetWidth, h = b && b.offsetHeight;
+      if (!w || !h) return M.estimatedSize(d, n);
+      return { w: w, h: h };
+    }
+
+    function endTween() {
+      if (!tween) return;
+      cancelAnimationFrame(tween.raf);
+      tween.targets.forEach(function (t) {
+        t.b.style.left = t.x1 + 'px';
+        t.b.style.top = t.y1 + 'px';
+      });
+      tween = null;
+    }
+
+    function startTween(from) {
+      // Slide the ideas from where they were to where the layout put them,
+      // redrawing the branches every frame. The doc itself is already final.
+      var targets = [];
+      M.nodes(d).forEach(function (n) {
+        var p = from[n.id], b = els.get(n.id);
+        if (!p || !b || (p[0] === n.x && p[1] === n.y)) return;
+        targets.push({ b: b, x0: p[0], y0: p[1], x1: n.x, y1: n.y });
+      });
+      if (!targets.length) return;
+      var t0 = performance.now();
+      function frame(now) {
+        var t = Math.min(1, (now - t0) / 250);
+        var e = 1 - Math.pow(1 - t, 3); // ease out
+        targets.forEach(function (tg) {
+          tg.b.style.left = tg.x0 + (tg.x1 - tg.x0) * e + 'px';
+          tg.b.style.top = tg.y0 + (tg.y1 - tg.y0) * e + 'px';
+        });
+        drawBranches();
+        if (t < 1) tween.raf = requestAnimationFrame(frame);
+        else endTween();
+      }
+      tween = { raf: requestAnimationFrame(frame), targets: targets };
+    }
+    var tween = null;
+
+    function tidy(label) {
+      // Lay the whole map out from the model. A `label` marks the button and
+      // menu taps as their own undo step; the automatic relayout that keeps
+      // tidy maps tidy arrives without one.
+      if (readOnly) return;
+      var from = {};
+      M.nodes(d).forEach(function (n) { from[n.id] = [n.x, n.y]; });
+      var entry = label ? record(label) : null;
+      var changed = M.layout(d, measureDom);
+      if (!changed) {
+        if (entry) unrecord(entry);
+        if (label) un.toast('Already tidy');
+        return;
+      }
+      tidyAt = tidyChecks + 1; // the commit that follows bumps the counter
+      registerTidyCheck();
+      endTween();
+      render();
+      select(selectedId);
+      fit(true);
+      if (!reducedMotion) startTween(from);
+    }
+
+    function toggleKeepTidy() {
+      if (readOnly) return;
+      var entry = record(M.isAutoLayout(d) ? 'Keep tidy off' : 'Keep tidy on');
+      if (M.isAutoLayout(d)) delete d.layout;
+      else d.layout = { auto: true };
+      if (M.isAutoLayout(d)) tidy(); // switching it on lays the map out now
+      commit();
     }
 
     // ── Undo and redo ────────────────────────────────────────────────────
@@ -406,6 +551,7 @@
     function render() {
       if (editing) finishEdit(true, false); // a rebuild ends the edit
       closeMenu(); // the buttons are rebuilt, so the menu's anchor would dangle
+      endTween();
       els.forEach(function (old) { if (old.parentNode) old.parentNode.removeChild(old); });
       els.clear();
       M.nodes(d).forEach(function (n) {
@@ -479,10 +625,11 @@
     // Where an idea's branch leaves it: the centre of a pill, or the
     // underline end of a text idea, facing the child.
     function edgeStart(n) {
-      if (M.isPill(d, n.id)) return [n.x, n.y];
+      var at = posOf(n);
+      if (M.isPill(d, n.id)) return at;
       var gp = M.node(d, n.parent);
-      var right = gp ? n.x >= gp.x : true;
-      return [right ? n.x + widthOf(n) : n.x - widthOf(n), n.y];
+      var right = gp ? at[0] >= posOf(gp)[0] : true;
+      return [right ? at[0] + widthOf(n) : at[0] - widthOf(n), at[1]];
     }
 
     function drawBranches() {
@@ -513,9 +660,10 @@
         var w = depth === 1 ? 'w1' : depth === 2 ? 'w2' : 'w3';
         var c = M.branchColor(d, n.id);
         var cls = w + ' ' + COLOR_CLASSES[c == null ? 0 : c];
-        var mx = (s[0] + n.x) / 2;
+        var np = posOf(n);
+        var mx = (s[0] + np[0]) / 2;
         paths += '<path class="' + cls + '" d="M' + s[0] + ' ' + s[1] +
-          'C' + mx + ' ' + s[1] + ', ' + mx + ' ' + n.y + ', ' + n.x + ' ' + n.y + '"/>';
+          'C' + mx + ' ' + s[1] + ', ' + mx + ' ' + np[1] + ', ' + np[0] + ' ' + np[1] + '"/>';
       });
       M.links(d).forEach(function (l) {
         var seg = linkSegment(l);
@@ -612,13 +760,14 @@
       var b = els.get(n.id);
       if (!b) return null;
       var w = b.offsetWidth, hh = b.offsetHeight;
+      var at = posOf(n);
       var x0;
-      if (M.isPill(d, n.id)) x0 = n.x - w / 2;
+      if (M.isPill(d, n.id)) x0 = at[0] - w / 2;
       else {
         var p = M.node(d, n.parent);
-        x0 = p && n.x < p.x ? n.x - w : n.x;
+        x0 = p && at[0] < posOf(p)[0] ? at[0] - w : at[0];
       }
-      return { x: x0, y: n.y - hh / 2, w: w, h: hh };
+      return { x: x0, y: at[1] - hh / 2, w: w, h: hh };
     }
 
     // The bounding box of every idea, in world coordinates.
@@ -717,6 +866,7 @@
       // A press anywhere else ends the edit, committing what was typed; the
       // press itself (on an idea, the paper, a bar) then does its own thing.
       if (editing) finishEdit(true, false);
+      endTween(); // a press stops the tidy animation where it is
       // The bars and the idea menu float over the paper; a press on them is
       // not a tap on it (one used to clear the selection before an action
       // could act).
@@ -834,6 +984,9 @@
           snapBack(gesture);
           applyReorder(gesture.id, drop.r); // a no-op when the rank is unchanged
         } else {
+          // A free drop with Keep tidy off: a main idea keeps facing its
+          // ideas outward. Same undo step, since the drag recorded already.
+          if (!M.isAutoLayout(d) && M.faceOutward(d, gesture.id)) render();
           commit();
         }
       } else if (gesture.kind === 'maybe-drag' && !gesture.moved) {
@@ -1777,6 +1930,7 @@
     // keep the pointer-free nudge (Mod+Alt+arrows restructure). A read-only view keeps the walk, the zoom
     // and the sheet; every key that edits waits for an owned map.
     rootEl.addEventListener('keydown', function (e) {
+      endTween(); // any key stops the tidy animation
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
       if (e.target.isContentEditable) return; // the inline editor's own keys
       var key = e.key;
@@ -1852,6 +2006,8 @@
         }
         if (e.altKey && !readOnly) {
           // Alt+arrows: the pointer-free nudge, 50 px with Shift, else 10.
+          // A map kept tidy stays tidy: nudging is off under auto layout.
+          if (M.isAutoLayout(d)) { e.preventDefault(); return; }
           var step = e.shiftKey ? 50 : 10;
           var dx = dir === 'left' ? -step : dir === 'right' ? step : 0;
           var dy = dir === 'up' ? -step : dir === 'down' ? step : 0;
@@ -1862,6 +2018,7 @@
             var now = Date.now();
             if (!(lastNudge.id === nudged && now - lastNudge.at < 1000)) record('move idea');
             M.moveSubtree(d, nudged, dx, dy);
+            M.faceOutward(d, nudged); // a main idea keeps facing outward
             M.subtree(d, nudged).forEach(function (m) {
               var b = els.get(m.id);
               if (b) { b.style.left = m.x + 'px'; b.style.top = m.y + 'px'; }
@@ -2004,6 +2161,7 @@
       fit: function () { fit(true); },
       destroy: function () {
         if (editing) finishEdit(true, false);
+        endTween();
         if (!readOnly) document.removeEventListener('keydown', onHistoryKey);
         root.removeEventListener('resize', onResize);
         if (vv) {

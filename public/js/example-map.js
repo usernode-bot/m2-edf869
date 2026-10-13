@@ -26,6 +26,8 @@
     add(renaming, 'Double tap an idea');
     add(colours, 'Each main idea gets its own');
     add(tidy, 'Delete what you don’t need');
+    M.layout(doc);
+    doc.layout = { auto: true }; // the example map starts kept tidy (#18)
     return doc;
   }
 
