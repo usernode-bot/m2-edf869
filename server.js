@@ -209,6 +209,11 @@ async function bootSchema() {
     );
     CREATE INDEX IF NOT EXISTS map_readers_user ON map_readers (user_id);
     COMMENT ON TABLE map_readers IS 'staging:private';
+
+    -- Bumped by every save. A save names the revision it was made from, so
+    -- a tab or device holding an older copy is refused instead of
+    -- overwriting a newer one (#12).
+    ALTER TABLE maps ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 0;
   `);
   if (IS_STAGING) {
     // A fixed "Anyone with the link" map owned by a fake person, so the
@@ -223,7 +228,7 @@ async function bootSchema() {
   }
 }
 
-const MAP_COLUMNS = 'id, title, doc, idea_count, created_at, updated_at';
+const MAP_COLUMNS = 'id, title, doc, idea_count, created_at, updated_at, revision';
 
 // The made-up person who owns the staging demo's shared maps.
 const DEMO_FRIEND = 'staging-demo-friend';
@@ -245,6 +250,7 @@ function mapFull(row) {
     doc: row.doc,
     ideaCount: row.idea_count,
     updatedAt: row.updated_at.toISOString(),
+    revision: row.revision,
   };
 }
 
@@ -383,6 +389,12 @@ app.post('/api/maps', async (req, res) => {
     let doc;
     if (req.body && req.body.from === 'example') {
       doc = newExampleDoc();
+    } else if (req.body && req.body.doc !== undefined) {
+      // A whole map, e.g. "Save mine as a copy" after a conflict. It starts
+      // Private at revision 0 like any new map.
+      doc = req.body.doc;
+      const why = M2Model.validate(doc);
+      if (why) return res.status(400).json({ error: why });
     } else {
       const title = typeof (req.body && req.body.title) === 'string' ? req.body.title.trim() : '';
       if (!title || title.length > M2Model.MAX_ROOT_TEXT) {
@@ -422,19 +434,44 @@ app.get('/api/maps/:id', async (req, res) => {
   }
 });
 
+// A save carries the revision it was made from. When the map has moved on
+// since (another tab or device saved), nothing is written and the answer is
+// 409 with the server's current copy, so the page can ask which to keep.
 app.put('/api/maps/:id', async (req, res) => {
   try {
     const doc = req.body && req.body.doc;
     const why = M2Model.validate(doc);
     if (why) return res.status(400).json({ error: why });
+    const base = req.body.baseRevision;
+    if (base !== undefined && !(Number.isInteger(base) && base >= 0 && base <= 2147483647)) {
+      return res.status(400).json({ error: 'bad baseRevision' });
+    }
+    const ownerId = String(req.user.id);
+    // A missing baseRevision comes from a tab opened before revisions
+    // existed: it saves as before (last save wins) but still bumps the
+    // revision, so newer tabs notice it. Remove once every client sends one.
     const updated = await pool.query(
-      `UPDATE maps SET doc = $3, title = $4, idea_count = $5, updated_at = $6
-       WHERE id = $1 AND owner_id = $2 RETURNING updated_at`,
-      [req.params.id, String(req.user.id), JSON.stringify(doc), doc.nodes[0].text.trim(),
-        doc.nodes.length, req.now]
+      `UPDATE maps SET doc = $3, title = $4, idea_count = $5, updated_at = $6,
+         revision = revision + 1
+       WHERE id = $1 AND owner_id = $2 AND ($7::int IS NULL OR revision = $7)
+       RETURNING revision, updated_at`,
+      [req.params.id, ownerId, JSON.stringify(doc), doc.nodes[0].text.trim(),
+        doc.nodes.length, req.now, base === undefined ? null : base]
     );
-    if (!updated.rowCount) return res.status(404).json({ error: 'Map not found' });
-    return res.json({ updatedAt: updated.rows[0].updated_at.toISOString() });
+    if (!updated.rowCount) {
+      const current = await pool.query(
+        'SELECT doc, revision FROM maps WHERE id = $1 AND owner_id = $2',
+        [req.params.id, ownerId]
+      );
+      if (!current.rowCount) return res.status(404).json({ error: 'Map not found' });
+      return res.status(409).json({
+        error: 'conflict', revision: current.rows[0].revision, doc: current.rows[0].doc,
+      });
+    }
+    return res.json({
+      updatedAt: updated.rows[0].updated_at.toISOString(),
+      revision: updated.rows[0].revision,
+    });
   } catch (err) {
     console.error('PUT /api/maps/:id failed: ' + err.message);
     return res.status(500).json({ error: 'Could not save the map' });

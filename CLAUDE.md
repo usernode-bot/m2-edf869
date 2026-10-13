@@ -188,4 +188,10 @@ Re-theme by changing the token values there, keeping every text pair at
   so they never pass for a branch, and go with either idea when it is
   deleted (`removeSubtree` carries them for Undo). At most 200 a map, names
   up to 60 characters.
+- `maps.revision` goes up by one on every save. `PUT /api/maps/:id` takes
+  `baseRevision` and writes only when it still matches; otherwise it answers
+  409 `{ error: 'conflict', revision, doc }` and `app.js` shows the conflict
+  sheet. A save without `baseRevision` (a tab opened before revisions
+  existed) still writes, last save wins; drop that path once old tabs are
+  gone. Any new write route that changes `doc` must bump `revision` too.
 - Avoid adding new dependencies; express, pg and jsonwebtoken cover it.
