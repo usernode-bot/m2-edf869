@@ -95,6 +95,11 @@
       "expectSelector": ".topbar .find-btn"
     },
     {
+      "name": "map.demo-more-button",
+      "path": "/?demo=1",
+      "expectSelector": ".topbar .more-btn"
+    },
+    {
       "name": "map.demo-recently-deleted",
       "path": "/?demo=1#/maps",
       "expectText": "Recently deleted"

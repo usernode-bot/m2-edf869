@@ -492,3 +492,60 @@ test('treeOrder answers an empty doc with nothing and changes no document', () =
   M.treeOrder(doc);
   assert.deepEqual(doc, before);
 });
+
+// ── Version history (#32) ─────────────────────────────────────────────
+
+test('versionReason keeps nothing within 10 minutes of the last version', () => {
+  const now = new Date('2026-06-01T12:00:00Z');
+  assert.equal(M.versionReason(10, 10, null, now), 'auto'); // the map's first
+  assert.equal(M.versionReason(10, 10, new Date('2026-06-01T11:51:00Z'), now), null);
+  assert.equal(M.versionReason(10, 10, new Date('2026-06-01T11:50:00Z'), now), 'auto');
+});
+
+test('versionReason calls a save that drops a fifth of the ideas a big delete', () => {
+  const now = new Date('2026-06-01T12:00:00Z');
+  const aMinuteAgo = new Date('2026-06-01T11:59:00Z');
+  assert.equal(M.versionReason(20, 15, aMinuteAgo, now), 'big-delete');
+  assert.equal(M.versionReason(20, 16, aMinuteAgo, now), null); // exactly 80%: kept
+});
+
+const { lisbonVersions } = require('../server/demo-maps');
+
+test('compareVersion carries the current ideas over as ghosts', () => {
+  const lisbonNow = lisbonDoc();
+  const version = lisbonVersions(new Date())[0].doc; // 16 ideas, no Budget
+  const merged = M.compareVersion(version, lisbonNow);
+  assert.deepEqual(merged.ghostIds, ['e1', 'e2', 'e3']);
+  assert.equal(merged.doc.nodes.length, 19);
+  merged.ghostIds.forEach((id) => {
+    const ghost = merged.doc.nodes.find((n) => n.id === id);
+    assert.ok(merged.doc.nodes.some((n) => n.id === ghost.parent),
+      'ghost ' + id + ' keeps a parent in the merged tree');
+  });
+  assert.equal(merged.doc.nodes.find((n) => n.id === 'root').text, 'Lisbon weekend');
+  assert.ok(!merged.doc.links, 'the links are the version own');
+});
+
+test('compareVersion prefers the version text and changes no input', () => {
+  const version = { v: 1, nodes: [{ id: 'root', parent: null, text: 'Old title', x: 0, y: 0 }] };
+  const current = {
+    v: 1,
+    nodes: [{ id: 'root', parent: null, text: 'New title', x: 5, y: 5 },
+      { id: 'n1', parent: 'root', text: 'New idea', x: 10, y: 10 }],
+  };
+  const beforeVersion = JSON.parse(JSON.stringify(version));
+  const beforeCurrent = JSON.parse(JSON.stringify(current));
+  const merged = M.compareVersion(version, current);
+  assert.equal(merged.doc.nodes[0].text, 'Old title');
+  assert.deepEqual(merged.ghostIds, ['n1']);
+  assert.deepEqual(version, beforeVersion);
+  assert.deepEqual(current, beforeCurrent);
+});
+
+test('lisbonVersions seeds two versions with fewer ideas than today', () => {
+  const versions = lisbonVersions(new Date('2026-06-01T12:00:00Z'));
+  assert.equal(versions.length, 2);
+  assert.deepEqual(versions.map((v) => v.ideaCount), [16, 11]);
+  assert.ok(versions[0].createdAt > versions[1].createdAt, 'newest first');
+  versions.forEach((v) => assert.equal(v.reason, 'auto'));
+});

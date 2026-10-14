@@ -130,6 +130,35 @@ function demoMaps(now) {
   }));
 }
 
+// Two earlier versions of the demo Lisbon map (#32), seeded into Version
+// history so the sheet has something to show: about an hour ago the Budget
+// branch (and its link) did not exist yet, and the day before that only
+// Food, Sights and the first two Transit ideas were there. Staging only.
+function lisbonVersions(now) {
+  const keep = (doc, ids) => {
+    doc.nodes = doc.nodes.filter(n => ids[n.id]);
+    delete doc.links; // the demo link runs d3 to e2, gone in every version
+    return doc;
+  };
+  const hourAgo = keep(lisbonDoc(), {
+    root: true, a1: true, a2: true, a3: true, a4: true,
+    b1: true, b2: true, b3: true, b4: true,
+    c1: true, c2: true, c3: true, c4: true,
+    d1: true, d2: true, d3: true,
+  });
+  const dayBefore = keep(lisbonDoc(), {
+    root: true, a1: true, a2: true, a3: true, a4: true,
+    b1: true, b2: true, b3: true, b4: true,
+    c1: true, c2: true,
+  });
+  return [
+    { revision: 0, doc: hourAgo, ideaCount: hourAgo.nodes.length,
+      createdAt: new Date(now.getTime() - 50 * 60000), reason: 'auto' },
+    { revision: 0, doc: dayBefore, ideaCount: dayBefore.nodes.length,
+      createdAt: new Date(now.getTime() - 26 * 3600000), reason: 'auto' },
+  ];
+}
+
 // A made-up friend's map, shared with the viewer (Shared with you) and by a
 // fixed secret link (the shared-link check). Staging only.
 function sharedDemoDoc() {
@@ -151,4 +180,4 @@ function trashedDemoDoc() {
   ]);
 }
 
-module.exports = { demoMaps, lisbonDoc, sharedDemoDoc, trashedDemoDoc };
+module.exports = { demoMaps, lisbonDoc, lisbonVersions, sharedDemoDoc, trashedDemoDoc };

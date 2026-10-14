@@ -611,6 +611,38 @@
     else delete doc.layout;
   }
 
+  // ── Version history (#32) ────────────────────────────────────────────
+  // Whether a save is worth keeping as a version: it is when it leaves
+  // under 80% of the ideas (a big delete, the one edit you most often want
+  // back), or when the last kept version is gone or at least 10 minutes
+  // old. Otherwise the version just now would be identical to the one
+  // before it, and null means "do not keep".
+  function versionReason(prevCount, nextCount, lastAt, now) {
+    if (nextCount < prevCount * 0.8) return 'big-delete';
+    if (!lastAt || now.getTime() - lastAt.getTime() >= 10 * 60000) return 'auto';
+    return null;
+  }
+
+  // A version laid over the map as it is now, so it can be shown without
+  // changing anything: the version's doc with every idea added since
+  // appended (in the current order, so the tree stays whole), and their ids
+  // listed so the view can fade them. Neither input is touched.
+  function compareVersion(versionDoc, currentDoc) {
+    var copy = JSON.parse(JSON.stringify(versionDoc));
+    var ghostIds = [];
+    if (currentDoc && copy.nodes) {
+      var have = {};
+      copy.nodes.forEach(function (n) { have[n.id] = true; });
+      nodes(currentDoc).forEach(function (n) {
+        if (!have[n.id]) {
+          ghostIds.push(n.id);
+          copy.nodes.push(JSON.parse(JSON.stringify(n)));
+        }
+      });
+    }
+    return { doc: copy, ghostIds: ghostIds };
+  }
+
   // Remove every link touching any of the ideas in `ids`; returns copies.
   function removeLinksFor(doc, ids) {
     if (!doc || !doc.links) return [];
@@ -1087,6 +1119,8 @@
     treeOrder: treeOrder,
     snapshot: snapshot,
     replaceWith: replaceWith,
+    versionReason: versionReason,
+    compareVersion: compareVersion,
     validate: validate,
     layout: layout,
     estimatedSize: estimatedSize,

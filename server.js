@@ -8,7 +8,7 @@ const jwt = require('jsonwebtoken');
 // UMD, so the browser loads it as window.M2Model and the server requires it.
 const M2Model = require('./public/js/map-model');
 const { exampleDoc } = require('./public/js/example-map');
-const { demoMaps, sharedDemoDoc, trashedDemoDoc } = require('./server/demo-maps');
+const { demoMaps, sharedDemoDoc, trashedDemoDoc, lisbonVersions } = require('./server/demo-maps');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -222,6 +222,23 @@ async function bootSchema() {
     ALTER TABLE maps ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
     CREATE INDEX IF NOT EXISTS maps_deleted
       ON maps (owner_id, deleted_at) WHERE deleted_at IS NOT NULL;
+
+    -- Version history (#32): a snapshot of a map as it was, written by the
+    -- save that replaced it (the previous doc) and by a restore (the map
+    -- just before going back). Personal notes: staging:private, and the
+    -- rows go with their map when it is purged.
+    CREATE TABLE IF NOT EXISTS map_versions (
+      id          bigserial PRIMARY KEY,
+      map_id      text NOT NULL REFERENCES maps(id) ON DELETE CASCADE,
+      revision    integer NOT NULL,
+      doc         jsonb NOT NULL,
+      idea_count  integer NOT NULL,
+      created_at  timestamptz NOT NULL,
+      reason      text NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS map_versions_map_created
+      ON map_versions (map_id, created_at DESC);
+    COMMENT ON TABLE map_versions IS 'staging:private';
   `);
   if (IS_STAGING) {
     // A fixed "Anyone with the link" map owned by a fake person, so the
@@ -355,6 +372,27 @@ app.get('/api/maps', async (req, res) => {
           trashed.nodes.length, new Date(req.now.getTime() - 19 * 86400000),
           new Date(req.now.getTime() - 18 * 86400000)]
       );
+      // Two earlier versions of the demo Lisbon map (#32), so Version
+      // history has something to show: one from about an hour ago, one from
+      // the day before yesterday. Idempotent on every ?demo=1 load, and
+      // only while the map is live and has no versions yet, so a restore
+      // made during the demo keeps the versions it earned. Staging only.
+      const lisbonId = 'demo-' + ownerId + '-lisbon';
+      const lisbonV = lisbonVersions(req.now);
+      await pool.query(
+        `INSERT INTO map_versions (map_id, revision, doc, idea_count, created_at, reason)
+         SELECT $1, v.revision, v.doc, v.idea_count, v.created_at, v.reason
+         FROM unnest($2::int[], $3::jsonb[], $4::int[], $5::timestamptz[], $6::text[])
+           AS v(revision, doc, idea_count, created_at, reason)
+         WHERE EXISTS (
+           SELECT 1 FROM maps WHERE id = $1 AND owner_id = $7 AND deleted_at IS NULL
+         ) AND NOT EXISTS (
+           SELECT 1 FROM map_versions WHERE map_id = $1
+         )`,
+        [lisbonId, lisbonV.map(v => v.revision),
+          lisbonV.map(v => JSON.stringify(v.doc)), lisbonV.map(v => v.ideaCount),
+          lisbonV.map(v => v.createdAt), lisbonV.map(v => v.reason), ownerId]
+      );
     }
     const rows = await pool.query(
       `SELECT ${MAP_COLUMNS} FROM maps
@@ -478,6 +516,9 @@ app.get('/api/maps/:id', async (req, res) => {
 // since (another tab or device saved), nothing is written and the answer is
 // 409 with the server's current copy, so the page can ask which to keep.
 app.put('/api/maps/:id', async (req, res) => {
+  // One transaction (#32): the row is locked, the previous doc may go into
+  // map_versions, then the save writes. Everything shares the one client.
+  const client = await pool.connect();
   try {
     const doc = req.body && req.body.doc;
     const why = M2Model.validate(doc);
@@ -487,35 +528,236 @@ app.put('/api/maps/:id', async (req, res) => {
       return res.status(400).json({ error: 'bad baseRevision' });
     }
     const ownerId = String(req.user.id);
+    await client.query('BEGIN');
+    const held = await client.query(
+      `SELECT doc, idea_count, revision FROM maps
+       WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL FOR UPDATE`,
+      [req.params.id, ownerId]
+    );
+    if (!held.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Map not found' });
+    }
+    const current = held.rows[0];
     // A missing baseRevision comes from a tab opened before revisions
     // existed: it saves as before (last save wins) but still bumps the
     // revision, so newer tabs notice it. Remove once every client sends one.
-    const updated = await pool.query(
-      `UPDATE maps SET doc = $3, title = $4, idea_count = $5, updated_at = $6,
-         revision = revision + 1
-       WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
-         AND ($7::int IS NULL OR revision = $7)
-       RETURNING revision, updated_at`,
-      [req.params.id, ownerId, JSON.stringify(doc), doc.nodes[0].text.trim(),
-        doc.nodes.length, req.now, base === undefined ? null : base]
-    );
-    if (!updated.rowCount) {
-      const current = await pool.query(
-        'SELECT doc, revision FROM maps WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL',
-        [req.params.id, ownerId]
-      );
-      if (!current.rowCount) return res.status(404).json({ error: 'Map not found' });
+    if (base !== undefined && current.revision !== base) {
+      await client.query('ROLLBACK');
       return res.status(409).json({
-        error: 'conflict', revision: current.rows[0].revision, doc: current.rows[0].doc,
+        error: 'conflict', revision: current.revision, doc: current.doc,
       });
     }
+    // The map as it was goes into version history when it is worth
+    // returning to (#32): a save that left under 80% of the ideas, or the
+    // first save after 10 quiet minutes. req.now keeps the staging clock
+    // consistent with the version's own age.
+    const last = await client.query(
+      'SELECT max(created_at) AS last_at FROM map_versions WHERE map_id = $1',
+      [req.params.id]
+    );
+    const reason = M2Model.versionReason(
+      current.idea_count, doc.nodes.length, last.rows[0].last_at, req.now
+    );
+    if (reason) {
+      await client.query(
+        `INSERT INTO map_versions (map_id, revision, doc, idea_count, created_at, reason)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [req.params.id, current.revision, JSON.stringify(current.doc),
+          current.idea_count, req.now, reason]
+      );
+    }
+    const updated = await client.query(
+      `UPDATE maps SET doc = $3, title = $4, idea_count = $5, updated_at = $6,
+         revision = revision + 1
+       WHERE id = $1 AND owner_id = $2
+       RETURNING revision, updated_at`,
+      [req.params.id, ownerId, JSON.stringify(doc), doc.nodes[0].text.trim(),
+        doc.nodes.length, req.now]
+    );
+    if (reason) await pruneVersions(client, req.params.id);
+    await client.query('COMMIT');
     return res.json({
       updatedAt: updated.rows[0].updated_at.toISOString(),
       revision: updated.rows[0].revision,
     });
   } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (e) { /* already gone */ }
     console.error('PUT /api/maps/:id failed: ' + err.message);
     return res.status(500).json({ error: 'Could not save the map' });
+  } finally {
+    client.release();
+  }
+});
+
+// ── Version history (#32) ────────────────────────────────────────────────
+// How versions are kept: all versions of the last 24 hours, then one per
+// day for 30 days, then one per week up to six months; anything older is
+// gone. Real time (SQL now()): retention is data lifecycle, like the trash
+// purge, not something the staging preview clock moves. Called inside the
+// save and restore transactions, and for every map from the hourly purge.
+async function pruneVersions(db, mapId) {
+  const scope = mapId ? [mapId] : [];
+  const andMap = mapId ? 'AND map_id = $1' : '';
+  await db.query(
+    `DELETE FROM map_versions WHERE id IN (
+       SELECT id FROM (
+         SELECT id, row_number() OVER (
+           PARTITION BY map_id, date_trunc('day', created_at)
+           ORDER BY created_at DESC) AS n
+         FROM map_versions
+         WHERE created_at < now() - interval '24 hours' ${andMap}
+       ) d WHERE n > 1
+     )`,
+    scope
+  );
+  await db.query(
+    `DELETE FROM map_versions WHERE id IN (
+       SELECT id FROM (
+         SELECT id, row_number() OVER (
+           PARTITION BY map_id, date_trunc('week', created_at)
+           ORDER BY created_at DESC) AS n
+         FROM map_versions
+         WHERE created_at < now() - interval '30 days'
+           AND created_at >= now() - interval '6 months' ${andMap}
+       ) d WHERE n > 1
+     )`,
+    scope
+  );
+  await db.query(
+    `DELETE FROM map_versions WHERE created_at < now() - interval '6 months' ${andMap}`,
+    scope
+  );
+}
+
+// A version id is a number. Anything else (or a version that belongs to
+// another map) is exactly the same 404 as a missing version.
+function versionId(raw) {
+  return /^\d+$/.test(raw) ? raw : null;
+}
+
+// The owner's version list, newest first, no docs: the sheet only shows
+// when and how much, and fetches a doc only when a version is opened.
+app.get('/api/maps/:id/versions', async (req, res) => {
+  try {
+    if (!req.user) return res.status(404).json({ error: 'Map not found' });
+    const map = await ownedMap(req.params.id, String(req.user.id));
+    if (!map) return res.status(404).json({ error: 'Map not found' });
+    const rows = await pool.query(
+      `SELECT id, created_at, idea_count, reason FROM map_versions
+       WHERE map_id = $1 ORDER BY created_at DESC, id DESC LIMIT 200`,
+      [map.id]
+    );
+    return res.json({
+      versions: rows.rows.map(row => ({
+        id: String(row.id),
+        createdAt: row.created_at.toISOString(),
+        ideaCount: row.idea_count,
+        reason: row.reason,
+      })),
+    });
+  } catch (err) {
+    console.error('GET /api/maps/:id/versions failed: ' + err.message);
+    return res.status(500).json({ error: 'Could not load Version history' });
+  }
+});
+
+app.get('/api/maps/:id/versions/:vid', async (req, res) => {
+  try {
+    if (!req.user) return res.status(404).json({ error: 'Map not found' });
+    const vid = versionId(req.params.vid);
+    if (!vid) return res.status(404).json({ error: 'Map not found' });
+    const map = await ownedMap(req.params.id, String(req.user.id));
+    if (!map) return res.status(404).json({ error: 'Map not found' });
+    const row = await pool.query(
+      `SELECT id, created_at, idea_count, reason, doc FROM map_versions
+       WHERE id = $1 AND map_id = $2`,
+      [vid, map.id]
+    );
+    if (!row.rowCount) return res.status(404).json({ error: 'Map not found' });
+    const v = row.rows[0];
+    return res.json({
+      version: {
+        id: String(v.id),
+        createdAt: v.created_at.toISOString(),
+        ideaCount: v.idea_count,
+        reason: v.reason,
+        doc: v.doc,
+      },
+    });
+  } catch (err) {
+    console.error('GET /api/maps/:id/versions/:vid failed: ' + err.message);
+    return res.status(500).json({ error: 'Could not load the version' });
+  }
+});
+
+// Restore: the map goes back to how the version shows it, and the map as it
+// is now goes into history first, always, so nothing is lost even when the
+// confirm sheet's words are not enough.
+app.post('/api/maps/:id/versions/:vid/restore', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const base = req.body && req.body.baseRevision;
+    if (base !== undefined && !(Number.isInteger(base) && base >= 0 && base <= 2147483647)) {
+      return res.status(400).json({ error: 'bad baseRevision' });
+    }
+    const vid = versionId(req.params.vid);
+    if (!vid) return res.status(404).json({ error: 'Map not found' });
+    if (!req.user) return res.status(404).json({ error: 'Map not found' });
+    const ownerId = String(req.user.id);
+    await client.query('BEGIN');
+    const held = await client.query(
+      `SELECT doc, idea_count, revision FROM maps
+       WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL FOR UPDATE`,
+      [req.params.id, ownerId]
+    );
+    if (!held.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Map not found' });
+    }
+    const current = held.rows[0];
+    if (base !== undefined && current.revision !== base) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'conflict', revision: current.revision, doc: current.doc,
+      });
+    }
+    const version = await client.query(
+      'SELECT doc FROM map_versions WHERE id = $1 AND map_id = $2',
+      [vid, req.params.id]
+    );
+    if (!version.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Map not found' });
+    }
+    const vDoc = version.rows[0].doc;
+    if (M2Model.validate(vDoc)) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: 'This version can’t be restored' });
+    }
+    await client.query(
+      `INSERT INTO map_versions (map_id, revision, doc, idea_count, created_at, reason)
+       VALUES ($1, $2, $3, $4, $5, 'before-restore')`,
+      [req.params.id, current.revision, JSON.stringify(current.doc),
+        current.idea_count, req.now]
+    );
+    const updated = await client.query(
+      `UPDATE maps SET doc = $3, title = $4, idea_count = $5, updated_at = $6,
+         revision = revision + 1
+       WHERE id = $1 AND owner_id = $2
+       RETURNING ${MAP_COLUMNS}`,
+      [req.params.id, ownerId, JSON.stringify(vDoc), vDoc.nodes[0].text.trim(),
+        vDoc.nodes.length, req.now]
+    );
+    await pruneVersions(client, req.params.id);
+    await client.query('COMMIT');
+    return res.json({ map: mapFull(updated.rows[0]) });
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (e) { /* already gone */ }
+    console.error('POST /api/maps/:id/versions/:vid/restore failed: ' + err.message);
+    return res.status(500).json({ error: 'Could not restore the version' });
+  } finally {
+    client.release();
   }
 });
 
@@ -614,6 +856,11 @@ async function purgeTrash() {
     );
     if (gone.rowCount > 0) {
       console.log(`Purged ${gone.rowCount} maps deleted over ${TRASH_DAYS} days ago`);
+    }
+    try {
+      await pruneVersions(pool, null);
+    } catch (err) {
+      console.warn('pruneVersions failed: ' + err.message);
     }
   } catch (err) {
     console.warn('purgeTrash failed: ' + err.message);
