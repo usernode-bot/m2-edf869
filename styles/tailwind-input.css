@@ -390,6 +390,18 @@
   .idea-main.is-drop-target {
     border-radius: 999px;
   }
+  /* Someone else holds this idea (#34): a ring in that person's colour.
+     It reads as "someone is here", not "about to" — that is the dashed
+     one above. */
+  .idea.peer-selected {
+    outline: 2px solid rgb(var(--who, var(--muted)));
+    outline-offset: 3px;
+    border-radius: 6px;
+  }
+  .idea-central.peer-selected,
+  .idea-main.peer-selected {
+    border-radius: 999px;
+  }
   /* Where a dragged idea would slot among its siblings: a thin cobalt line
      in the world, so it scales with the map. */
   .drop-line {
@@ -470,6 +482,74 @@
   .b-indigo { background: rgb(var(--branch-indigo)); }
   .b-pink { background: rgb(var(--branch-pink)); }
   .b-slate { background: rgb(var(--branch-slate)); }
+
+  /* Live co-editing (#34): whose ring and whose dot. One class per branch
+     colour, so presence uses the same ten colours as the branches, in both
+     looks — the text on top stays fg, which keeps every pair readable. */
+  .who-teal { --who: var(--branch-teal); }
+  .who-amber { --who: var(--branch-amber); }
+  .who-violet { --who: var(--branch-violet); }
+  .who-rose { --who: var(--branch-rose); }
+  .who-sky { --who: var(--branch-sky); }
+  .who-green { --who: var(--branch-green); }
+  .who-orange { --who: var(--branch-orange); }
+  .who-indigo { --who: var(--branch-indigo); }
+  .who-pink { --who: var(--branch-pink); }
+  .who-slate { --who: var(--branch-slate); }
+
+  /* The initials in the top bar: a ring badge in the person's colour, up
+     to three, then how many more. */
+  .presence {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+  }
+  .presence-dot {
+    width: 24px;
+    height: 24px;
+    border-radius: 999px;
+    border: 2px solid rgb(var(--who, var(--muted)));
+    background: rgb(var(--surface));
+    color: rgb(var(--fg));
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    line-height: 1;
+    font-weight: 600;
+    flex: none;
+  }
+  .presence-more {
+    font-size: 12px;
+    line-height: 20px;
+    color: rgb(var(--muted));
+    flex: none;
+  }
+  /* The name tag on a ring someone else holds, in world coordinates just
+     above the idea. It carries nothing a reader needs: the spoken line of
+     the idea already says who holds it. */
+  .peer-tags {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 0;
+    height: 0;
+  }
+  .presence-tag {
+    position: absolute;
+    transform: translateY(-100%);
+    background: rgb(var(--surface));
+    border: 1.5px solid rgb(var(--who, var(--muted)));
+    color: rgb(var(--fg));
+    border-radius: 999px;
+    padding: 0 8px;
+    font-size: 12px;
+    line-height: 20px;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 2;
+  }
 
   /* The Colour panel (#20): a grid of swatches, five across. A swatch is a
      44 px button carrying a 28 px disc of the colour; the branch's own
@@ -578,12 +658,16 @@
   /* Below 480 px the Maps and Share buttons keep their icons and their
      aria-labels only, so Fit and the undo and redo buttons stay on screen.
      The "Edited by …" status is the first thing to go: it is news, not
-     control, and it is still in the list of maps. */
+     control, and it is still in the list of maps. The top bar still has
+     seven buttons there, so the staging pill gives way entirely: it
+     overlaps Undo if it stays. A reader's View only pill stays — a
+     read-only bar has room for it. */
   @media (max-width: 479px) {
     .topbar .btn-label {
       display: none;
     }
-    .topbar .save-status.is-edited {
+    .topbar .save-status.is-edited,
+    .topbar .demo-pill {
       display: none;
     }
   }
@@ -675,6 +759,18 @@
   .actions .btn-primary,
   .actions .btn-wide {
     flex: 1;
+  }
+  /* The version bar (#32): its name and meta stack, since the sentence is
+     long, and on a narrow phone the two buttons do too. */
+  .version-bar .selection {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+  @media (max-width: 480px) {
+    .version-bar .actions {
+      flex-direction: column;
+    }
   }
   /* The idea menu (#9): a small white bar floating just above the selected
      idea, with Edit, Add child, Join and Delete. It sits over the paper,
@@ -963,6 +1059,15 @@
   .link-label.is-dim {
     opacity: 0.15;
     pointer-events: none;
+  }
+  /* Ideas added since the version being viewed (#32): faintly there, and
+     the version's own Undo and keys never reach them. */
+  .idea.is-ghost {
+    opacity: 0.35;
+    pointer-events: none;
+  }
+  .branches path.ghost {
+    opacity: 0.35;
   }
   /* Far out, the small words go: deep ideas keep only their underline, and
      a link's name waits until you zoom back in. */

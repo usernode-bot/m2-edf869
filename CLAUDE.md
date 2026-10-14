@@ -246,9 +246,31 @@ Re-theme by changing the token values there, keeping every text pair at
   idea holds `tabindex="0"` (the roving stop chosen by `rovingId`). A new
   edit path ends in `commit()` and gets its announcement for free — no
   second code path may set `aria-label` or speak its own way.
+- Earlier versions live in `map_versions` (staging:private). A version is
+  kept by the PUT save and by restore, inside their transactions, through
+  `M2Model.versionReason` (big delete, or 10 minutes since the last one);
+  the previous doc is written before the map changes. Any future write
+  route that changes `doc` (an import, an AI write) inserts the previous
+  doc first, with its own reason, so history never skips. The three
+  version routes are owner-only and answer 404 exactly like a missing map;
+  restore answers 409 on a stale `baseRevision`, like the PUT save.
 - Deleting a map soft-deletes it: `maps.deleted_at` is set (from `req.now`),
   and every map route filters `AND deleted_at IS NULL` so a trashed map
   answers 404 for everyone, exactly like a missing one. It is kept 30 days
   (`GET /api/trash`, `POST /api/maps/:id/restore`,
   `DELETE /api/maps/:id/permanent`); the purge runs at boot and hourly and
   uses real time (SQL `now()`), never `req.now`.
+- Live co-editing (#34) is one stream per open map:
+  `GET /api/maps/:id/events` (SSE, token or share in the query) carries
+  `hello`/`doc`/`presence`/`gone`/`resync`/`bye`, always fanned out through
+  Postgres LISTEN/NOTIFY on channel `m2_events` — every route that changes
+  a map's doc or deletes one calls `notify()`. Presence (who is here, which
+  idea each holds) lives in memory with a 40 s TTL, refreshed by the
+  clients' POSTs to `/api/maps/:id/presence[/leave]`; it never touches the
+  database. A newer copy that arrives is merged, not reloaded: the merge
+  lives in `public/js/map-merge.js` (pure, validated by `map-model.js` —
+  `{ doc: null }` means show the conflict sheet), the saver's `baseDoc` is
+  the base, `applyRemote` is the only way a remote doc reaches the canvas,
+  and peer presence (rings, tags, the initials in the top bar) is view
+  state rendered by `setPresence` in `canvas.js` — never recorded, never
+  in the doc.

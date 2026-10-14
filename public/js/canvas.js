@@ -12,6 +12,7 @@
 
   var COLOR_CLASSES = ['c-teal', 'c-amber', 'c-violet', 'c-rose', 'c-sky', 'c-green', 'c-orange', 'c-indigo', 'c-pink', 'c-slate'];
   var DOT_CLASSES = ['b-teal', 'b-amber', 'b-violet', 'b-rose', 'b-sky', 'b-green', 'b-orange', 'b-indigo', 'b-pink', 'b-slate'];
+  var WHO_CLASSES = ['who-teal', 'who-amber', 'who-violet', 'who-rose', 'who-sky', 'who-green', 'who-orange', 'who-indigo', 'who-pink', 'who-slate'];
   var COLOR_NAMES = ['Teal', 'Amber', 'Violet', 'Rose', 'Sky', 'Green', 'Orange', 'Indigo', 'Pink', 'Slate'];
 
   var ICONS = {
@@ -33,6 +34,8 @@
     chevronUp: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>',
     chevronDown: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>',
     close: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>',
+    more: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>',
+    history: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 5.5v4h4"/><path d="M4 9.5a8 8 0 1 1-.3 4"/><path d="M12 8v4.5l3 1.8"/></svg>',
   };
 
   // The keyboard shortcuts (#15), one table the sheet is drawn from, so the
@@ -177,6 +180,10 @@
     var saveTimer = 0;
     var els = new Map(); // node id -> button
     var linkEls = new Map(); // link id -> label button
+    // Live co-editing (#34): who else is on this map and which idea each of
+    // them holds. Presence is view state: never recorded, never saved.
+    var peers = []; // [{ id, username, selectedId, color }] without this screen
+    var peersSeen = false; // the first sheet answers quietly; joins and leaves speak
 
     // Undo and redo: snapshots of the doc before each edit, in memory only,
     // so the history dies with the view and no other map ever sees it.
@@ -201,6 +208,11 @@
     var treeEl = el('div', 'ideas');
     treeEl.setAttribute('role', 'tree');
     world.appendChild(treeEl);
+    // The name tags that sit on the rings others hold (aria-hidden: what
+    // they say is already in each idea's spoken line).
+    var peerLayer = el('div', 'peer-tags');
+    peerLayer.setAttribute('aria-hidden', 'true');
+    world.appendChild(peerLayer);
     rootEl.appendChild(world);
 
     // Top bar: Maps, the demo and View only pills, save status, Share and Fit.
@@ -260,6 +272,14 @@
       tidyBtn.addEventListener('click', function () { tidy('Tidy up'); commit(); });
       topRight.appendChild(tidyBtn);
     }
+    // Who else is on this map (#34): up to three coloured initials, then
+    // how many more. It shows on every view — a viewer sees the other
+    // readers too — and hides while nobody else is here.
+    var presenceEl = el('div', 'presence');
+    presenceEl.setAttribute('role', 'group');
+    presenceEl.hidden = true;
+    topRight.appendChild(presenceEl);
+
     // Find in map (#23), on every view: a read-only search that a viewer or
     // a guest can use too.
     var findBtn = el('button', 'btn-secondary btn-icon find-btn');
@@ -279,6 +299,23 @@
     kbdBtn.appendChild(icon('keyboard'));
     kbdBtn.addEventListener('click', function () { openShortcuts(); });
     topRight.appendChild(kbdBtn);
+
+    // Version history (#32): one tap under More, so the top bar stays
+    // quiet and later entries have somewhere to go.
+    if (opts.onVersionHistory) {
+      var moreBtn = el('button', 'btn-secondary btn-icon more-btn');
+      moreBtn.type = 'button';
+      moreBtn.setAttribute('aria-label', 'More');
+      moreBtn.title = 'More';
+      moreBtn.appendChild(icon('more'));
+      moreBtn.addEventListener('click', function () {
+        un.popover({
+          anchorEl: moreBtn,
+          items: [{ label: 'Version history', handler: opts.onVersionHistory }],
+        });
+      });
+      topRight.appendChild(moreBtn);
+    }
     topbar.appendChild(topRight);
     rootEl.appendChild(topbar);
 
@@ -361,7 +398,36 @@
     // Bottom bar: the selection line, then Add idea, or only Cancel while a
     // link waits for its second idea. A read-only view has none of it.
     var bar = null, selLine, addBtn, cancelBtn;
-    if (!readOnly) {
+    var ghosts = null; // ids of ideas added since the version being shown
+    if (opts.version) {
+      // Version mode (#32): an owned map read-only at an earlier version,
+      // with its own bar saying what is on the paper.
+      if (opts.version.ghostIds) {
+        ghosts = {};
+        opts.version.ghostIds.forEach(function (id) { ghosts[id] = true; });
+      }
+      bar = el('div', 'bottom-bar version-bar');
+      selLine = el('div', 'selection');
+      selLine.appendChild(el('span', 'sel-name',
+        'Viewing the version from ' + opts.version.label));
+      selLine.appendChild(el('span', 'sel-meta',
+        opts.version.ideaCount + ' ideas' +
+        (opts.version.ghostIds && opts.version.ghostIds.length
+          ? '. Faded ideas were added since.' : '')));
+      bar.appendChild(selLine);
+      var vActions = el('div', 'actions');
+      var restoreBtn = el('button', 'btn-primary', 'Restore this version');
+      restoreBtn.type = 'button';
+      restoreBtn.addEventListener('click', function () { opts.version.onRestore(); });
+      var backBtn = el('button', 'btn-secondary btn-wide', 'Back to current');
+      backBtn.type = 'button';
+      backBtn.addEventListener('click', function () { opts.version.onBack(); });
+      vActions.appendChild(restoreBtn);
+      vActions.appendChild(backBtn);
+      bar.appendChild(vActions);
+      rootEl.appendChild(bar);
+      announce('Viewing the version from ' + opts.version.label);
+    } else if (!readOnly) {
       bar = el('div', 'bottom-bar');
       selLine = el('div', 'selection');
       bar.appendChild(selLine);
@@ -443,6 +509,112 @@
     // A map someone else just saved opens with the news: who and when. The
     // first save here (Saving) replaces it.
     if (opts.editedBy) setStatus('edited');
+
+    // ── Live co-editing (#34) ────────────────────────────────────────────
+    // The stream's state shows as data-live on the canvas: open, connecting
+    // while it tries again, off when there is no stream (a paused tab, a
+    // gone map). Purely view state.
+    function setLive(state) {
+      rootEl.dataset.live = state === 'open' || state === 'connecting' ? state : 'off';
+    }
+    setLive('connecting');
+
+    // The people on this map besides this screen. Saying who came and went
+    // is the join and leave's own announcement; the sheet keeps quiet about
+    // who was already here when it arrived.
+    function setPresence(people) {
+      var before = {};
+      peers.forEach(function (p) { before[p.id] = p; });
+      peers = (people || []).filter(function (p) {
+        return p && typeof p.id === 'string' && p.id;
+      });
+      if (peersSeen) {
+        var after = {};
+        peers.forEach(function (p) { after[p.id] = p; });
+        Object.keys(before).forEach(function (id) {
+          if (!after[id]) announce((before[id].username || 'Someone') + ' left the map');
+        });
+        Object.keys(after).forEach(function (id) {
+          if (!before[id]) announce((after[id].username || 'Someone') + ' joined the map');
+        });
+      }
+      peersSeen = true;
+      renderPresence();
+      renderPeers(); // a move of someone's ring does not wait for a redraw
+    }
+
+    // The initials in the top bar: up to three, then how many more.
+    function renderPresence() {
+      presenceEl.hidden = peers.length === 0;
+      presenceEl.textContent = '';
+      peers.slice(0, 3).forEach(function (p) {
+        var name = p.username || 'Someone';
+        var dot = el('span', 'presence-dot who-' + (p.color || 'slate'), name.trim().slice(0, 1).toUpperCase() || '?');
+        dot.title = name;
+        presenceEl.appendChild(dot);
+      });
+      if (peers.length > 3) {
+        presenceEl.appendChild(el('span', 'presence-more', '+' + (peers.length - 3)));
+      }
+      presenceEl.setAttribute('aria-label', peers.length
+        ? 'On this map: ' + peers.map(function (p) { return p.username || 'Someone'; }).join(', ')
+        : '');
+      // The names in words as well, so they are plain text on the page and
+      // not only an attribute.
+      presenceEl.appendChild(el('span', 'sr-only', presenceEl.getAttribute('aria-label')));
+    }
+
+    // The rings: one on every idea another person holds selected, in that
+    // person's colour, with their name on a tag beside it. Two people on
+    // one idea share the ring; the tag names the first and how many more.
+    function renderPeers() {
+      els.forEach(function (b) {
+        b.classList.remove('peer-selected');
+        WHO_CLASSES.forEach(function (c) { b.classList.remove(c); });
+      });
+      peerLayer.textContent = '';
+      var held = new Map(); // idea id -> [people]
+      peers.forEach(function (p) {
+        if (!p.selectedId || !els.get(p.selectedId)) return;
+        if (!held.has(p.selectedId)) held.set(p.selectedId, []);
+        held.get(p.selectedId).push(p);
+      });
+      held.forEach(function (group, id) {
+        var b = els.get(id);
+        var who = group[0].color || 'slate';
+        b.classList.add('peer-selected');
+        b.classList.add('who-' + who);
+        var names = group.map(function (p) { return p.username || 'Someone'; });
+        var tag = el('span', 'presence-tag who-' + who,
+          names[0] + (names.length === 2 ? ' +1' : names.length > 2 ? ' +' + (names.length - 1) : ''));
+        tag.title = names.join(', ');
+        tag.style.left = b.style.left;
+        tag.style.top = b.style.top;
+        peerLayer.appendChild(tag);
+      });
+    }
+
+    // A remote copy of the map arrived: a merge on the owner's screen, or
+    // the server's latest on a read-only view. The undo history is the old
+    // map's — other people's edits are not this screen's to undo — and
+    // whatever view state still can, survives: the selection, focus if its
+    // idea is still here, the viewport (nothing here touches it).
+    function applyRemote(next) {
+      if (!next) return;
+      if (gesture) { // a hand is on the paper; take the update when it lifts
+        setTimeout(function () { applyRemote(next); }, 250);
+        return;
+      }
+      if (focusId && !M.node(next, focusId)) exitFocus(); // its idea is gone
+      M.replaceWith(d, next);
+      undoStack = []; redoStack = [];
+      renderHistory();
+      if (selectedId && !M.node(d, selectedId)) selectedId = null;
+      render(); // ends an inline edit, rebuilds the ideas, redraws the branches
+      select(selectedId);
+      drawMinimap();
+      announce('Map updated');
+    }
 
     function selNode() { return selectedId ? M.node(d, selectedId) : null; }
 
@@ -752,6 +924,16 @@
       renderHistory();
     }
 
+    // A whole new doc in one step, the way a restore arrives (#32): one
+    // undo entry covers it, and a selection the new doc lacks is cleared.
+    function replaceDoc(next, label) {
+      record(label);
+      M.replaceWith(d, M.snapshot(next));
+      if (selectedId && !M.node(d, selectedId)) selectedId = null;
+      render();
+      commit();
+    }
+
     function renderHistory() {
       if (!undoBtn) return;
       var u = undoStack[undoStack.length - 1];
@@ -770,10 +952,30 @@
     // it (ideas under it, links to other ideas). Newlines are spoken as
     // spaces, so a two-line idea reads as one line.
     function spoken(text) { return (text || '').replace(/\n/g, ' '); }
+    // Who else holds this idea selected: "Ana", or "Ana and Ben". It goes
+    // into the idea's spoken line and is shown beside its ring.
+    function peerHeld(id) {
+      var names = [];
+      peers.forEach(function (p) {
+        if (p.selectedId === id) names.push(p.username || 'Someone');
+      });
+      if (names.length === 0) return null;
+      if (names.length === 1) return names[0];
+      if (names.length === 2) return names[0] + ' and ' + names[1];
+      return names[0] + ' and ' + (names.length - 1) + ' more';
+    }
     function ideaLabel(n) {
+      var line = baseLabel(n);
+      if (ghosts && ghosts[n.id]) line += ', added since this version';
+      return line;
+    }
+
+    function baseLabel(n) {
+      var held = peerHeld(n.id);
+      var said = held ? ', selected by ' + held : '';
       if (n.id === 'root') {
         var mains = M.childrenOf(d, 'root').length;
-        return spoken(n.text) + ', central idea, ' + mains + ' main idea' + (mains === 1 ? '' : 's');
+        return spoken(n.text) + ', central idea, ' + mains + ' main idea' + (mains === 1 ? '' : 's') + said;
       }
       var parent = M.node(d, n.parent);
       var line = spoken(n.text) + ', level ' + (M.depth(d, n.id) + 1) +
@@ -792,7 +994,7 @@
       else if (linked.length > 2) {
         line += ', linked to ' + linked[0] + ', ' + linked[1] + ' and ' + (linked.length - 2) + ' more';
       }
-      return line;
+      return line + said;
     }
 
     function render() {
@@ -829,6 +1031,7 @@
         if (n.id !== 'root') b.setAttribute('aria-haspopup', 'menu');
         if (M.depth(d, n.id) >= 3) b.classList.add('lvl-deep');
         if (focusId && !underFocus(n.id)) b.classList.add('is-dim');
+        if (ghosts && ghosts[n.id]) b.classList.add('is-ghost');
         b.setAttribute('aria-label', ideaLabel(n));
         b.style.left = n.x + 'px';
         b.style.top = n.y + 'px';
@@ -851,6 +1054,7 @@
       requestAnimationFrame(drawBranches);
       drawBranchesSoon();
       refreshFind(); // a rebuild drops the find marks; re-apply them
+      renderPeers(); // the rings go back on the fresh buttons
     }
 
     var branchFrame = 0;
@@ -979,6 +1183,7 @@
         var np = posOf(n);
         var mx = (s[0] + np[0]) / 2;
         if (focusId && !underFocus(n.id)) cls += ' dim';
+        if (ghosts && ghosts[n.id]) cls += ' ghost';
         paths += '<path class="' + cls + '" d="M' + s[0] + ' ' + s[1] +
           'C' + mx + ' ' + s[1] + ', ' + mx + ' ' + np[1] + ', ' + np[0] + ' ' + np[1] + '"/>';
       });
@@ -1618,6 +1823,8 @@
       }
       syncTree(); // aria-selected and the roving tab stop follow the ring
       renderBar();
+      // The live stream says which idea this screen holds (#34).
+      if (opts.onSelect) opts.onSelect(id);
     }
 
     function countText(n) {
@@ -1630,7 +1837,7 @@
     }
 
     function renderBar() {
-      if (!bar) return;
+      if (!bar || readOnly) return;
       selLine.textContent = '';
       var n = selNode();
       var full = M.ideaCount(d) >= M.MAX_NODES;
@@ -2309,7 +2516,7 @@
     function setHint(text) {
       if (text === dragHint) return;
       dragHint = text;
-      if (!bar) return;
+      if (!bar || readOnly) return;
       if (text == null) { renderBar(); return; }
       selLine.textContent = '';
       selLine.appendChild(el('span', 'sel-meta', text));
@@ -2501,7 +2708,7 @@
       setTimeout(function () { close.focus(); }, 60);
     }
 
-    if (bar) {
+    if (addBtn) {
       cancelBtn.addEventListener('click', cancelLink);
       addBtn.addEventListener('click', openAdd);
     }
@@ -2926,6 +3133,7 @@
     // Undo and redo also work when nothing on the canvas has focus (after a
     // click on a top-bar button, say). Fields keep their own text undo.
     function onHistoryKey(e) {
+      if (rootEl.closest('[hidden]')) return; // the view is hidden behind another
       if (e.altKey) return;
       var t = e.target;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
@@ -2944,7 +3152,11 @@
     return {
       el: rootEl,
       setStatus: setStatus,
+      applyRemote: applyRemote,
+      setPresence: setPresence,
+      setLive: setLive,
       fit: function () { fit(true); },
+      replaceDoc: replaceDoc,
       destroy: function () {
         // A pending save flushes on teardown, unless a focused view is what
         // is on screen: that one is never kept.
