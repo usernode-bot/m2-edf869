@@ -20,6 +20,7 @@
   var mapParam = params.get('map');
 
   function destroyView() {
+    if (liveRef) { liveRef.close(); liveRef = null; }
     if (view) { view.destroy(); view = null; }
   }
 
@@ -47,6 +48,9 @@
     var state = {
       dirty: false, timer: 0, inFlight: false, doc: null, failures: 0, dead: false,
       base: typeof opts.revision === 'number' ? opts.revision : 0,
+      // The copy the base revision holds (#34): the middle of the three-way
+      // merge when a change made elsewhere arrives while edits sit here.
+      baseDoc: opts.doc ? JSON.parse(JSON.stringify(opts.doc)) : null,
       conflict: false, server: null,
     };
     var BACKOFF = [2000, 5000, 10000];
@@ -57,8 +61,10 @@
       state.timer = setTimeout(send, ms == null ? 700 : ms);
     }
 
-    function saved(r) {
+    function saved(r, snapshot) {
       if (r && typeof r.revision === 'number') state.base = r.revision;
+      // What the server now holds at that revision: the merge's base.
+      if (snapshot) state.baseDoc = snapshot;
     }
 
     function enterConflict(server) {
@@ -83,7 +89,7 @@
       api('PUT', '/api/maps/' + opts.mapId, { doc: snapshot, baseRevision: state.base }).then(function (r) {
         state.inFlight = false;
         state.failures = 0;
-        saved(r);
+        saved(r, snapshot);
         if (state.dead) return;
         if (state.dirty) schedule(0);
         else setStatus('saved');
@@ -135,22 +141,23 @@
         state.timer = 0;
         state.dirty = false;
         state.inFlight = true;
+        var body = JSON.parse(JSON.stringify(state.doc));
         fetch(url, {
           method: 'PUT', headers: headers, keepalive: true,
-          body: JSON.stringify({ doc: JSON.parse(JSON.stringify(state.doc)), baseRevision: state.base }),
+          body: JSON.stringify({ doc: body, baseRevision: state.base }),
         }).then(function (res) {
-          return res.json().catch(function () { return null; }).then(function (body) {
+          return res.json().catch(function () { return null; }).then(function (resp) {
             state.inFlight = false;
             if (state.dead) return;
             if (res.ok) {
-              saved(body);
+              saved(resp, body);
               if (state.dirty) schedule(0);
               else setStatus('saved');
             } else if (res.status === 404) {
               state.dead = true;
               state.dirty = false;
             } else if (res.status === 409) {
-              enterConflict(body);
+              enterConflict(resp);
             } else {
               state.dirty = true;
               schedule(BACKOFF[0]);
@@ -168,6 +175,13 @@
       inConflict: function () { return state.conflict; },
       busy: function () { return state.inFlight || state.conflict; },
       revision: function () { return state.base; },
+      baseDoc: function () { return state.baseDoc; },
+      // The merge settled on the server's copy as the new base (#34): what
+      // the screen keeps unsaved now sits on top of that revision.
+      adopt: function (revision, doc) {
+        if (typeof revision === 'number') state.base = revision;
+        state.baseDoc = JSON.parse(JSON.stringify(doc));
+      },
       // A newer copy was found without a refused save (coming back to the
       // tab with unsaved edits): same state as a 409.
       showConflict: function (server) { enterConflict(server); },
@@ -193,8 +207,10 @@
 
   // ── One map ──────────────────────────────────────────────────────────
   var saverRef = null;
-  var current = null; // { map, withoutMaps, saver } for the open owner map
+  var openRef = null; // { id, doc, mode, withoutMaps, saver, fetchPath } for the map on screen
   var conflictOpen = false; // the conflict sheet is on screen
+  var liveRef = null; // the map's live stream, when one is open
+  var pulling = false; // one latest-version fetch at a time
 
   function toast(message, opts) {
     if (root.unNative) root.unNative.toast(message, opts);
@@ -212,11 +228,23 @@
     var saver = owner ? makeSaver({
       mapId: map.id,
       revision: map.revision,
+      doc: map.doc,
       setStatus: function (kind) { if (v) v.setStatus(kind); },
       onConflict: function (server) { onConflict(saver, map, withoutMaps, server); },
     }) : null;
     saverRef = saver;
-    current = owner ? { map: map, withoutMaps: withoutMaps, saver: saver } : null;
+    openRef = guest ? null : {
+      id: map.id,
+      doc: map.doc,
+      mode: mode,
+      withoutMaps: withoutMaps,
+      saver: saver,
+      // A map opened through a secret link is read through that link; one
+      // opened by id (or owned) through the map routes.
+      fetchPath: shareParam && mode === 'viewer'
+        ? '/api/shared/' + encodeURIComponent(shareParam)
+        : '/api/maps/' + encodeURIComponent(map.id),
+    };
     conflictOpen = false;
     var el = render(root.M2Canvas.loadingEl());
     v = root.M2Canvas.CanvasView(el, {
@@ -229,6 +257,7 @@
       initialStatus: guest ? 'guest' : 'none',
       onOpenMaps: withoutMaps ? null : function () { location.hash = '#/maps'; },
       onShare: owner ? function () { root.M2ShareSheet(map.id, map.doc.nodes[0].text.trim()); } : null,
+      onSelect: guest ? null : function (id) { if (liveRef) liveRef.setSelection(id); },
       onDeleteMap: function () {
         // Anything still unsaved goes first, so the trashed copy has it.
         if (saver) saver.flushNow();
@@ -256,6 +285,15 @@
     });
     view = v;
     if (guest) v.setStatus('guest');
+    // The live stream: everyone on a real map, owner or viewer. The guest's
+    // example exists only in memory here, so there is nothing to join.
+    if (!guest) {
+      liveRef = root.M2Live.connect({
+        mapId: map.id,
+        onState: function (state) { if (view === v) v.setLive(state); },
+        onEvent: onLiveEvent,
+      });
+    }
     window.addEventListener('pagehide', onPageHide);
   }
 
@@ -318,32 +356,104 @@
     });
   }
 
-  // Coming back to the tab: if the map was saved somewhere else meanwhile,
-  // load it quietly when nothing here is unsaved, or ask which to keep.
-  function checkForNewer() {
-    var c = current;
-    if (!c || saverRef !== c.saver) return;
-    var s = c.saver;
-    if (s.inConflict()) { onConflict(s, c.map, c.withoutMaps, null); return; }
-    if (s.busy()) return;
-    api('GET', '/api/maps/' + encodeURIComponent(c.map.id)).then(function (r) {
-      if (current !== c || saverRef !== s || s.busy() || r.access !== 'owner') return;
-      if (!(r.map.revision > s.revision())) return;
-      if (s.isDirty()) {
-        s.showConflict(r.map);
-      } else {
-        s.drop();
-        showMap(r.map, 'owner', c.withoutMaps);
+  // ── Live co-editing (#34) ─────────────────────────────────────────────
+  // The stream says a newer copy exists (doc), that everything should be
+  // fetched again (resync, hello), that someone arrived or moved (presence)
+  // or that the map is gone. A doc event is answered with one fetch, and
+  // the fetch is answered with the merge — never with a whole-screen
+  // reload, so nothing the reader is doing is disturbed.
+  function onLiveEvent(kind, data) {
+    var c = openRef;
+    if (!c) return;
+    if (kind === 'presence') {
+      // The server's sheet holds this screen too; take it out, the view
+      // only shows the others.
+      var people = (data.people || []).filter(function (p) {
+        return !c.you || p.id !== c.you;
+      });
+      if (view && view.setPresence) view.setPresence(people);
+      return;
+    }
+    if (kind === 'gone') {
+      destroyView();
+      mapError({ status: 404 });
+      return;
+    }
+    if (kind === 'hello') {
+      c.you = data.you || null; // this screen's own id, so its presence dot is not drawn
+      pullLatest();
+      return;
+    }
+    if (kind === 'doc' || kind === 'resync') pullLatest();
+  }
+
+  function pullLatest() {
+    var c = openRef;
+    if (!c || pulling) return;
+    pulling = true;
+    api('GET', c.fetchPath).then(function (r) {
+      pulling = false;
+      if (openRef !== c) return; // the screen moved on meanwhile
+      var server = r.map;
+      if (!server || !server.doc) return;
+      if (c.mode !== 'owner') {
+        // View only: whatever the server holds is what everyone sees.
+        if (view && view.applyRemote) view.applyRemote(server.doc);
+        return;
       }
-    }).catch(function () {});
+      mergeIn(c, server);
+    }).catch(function () {
+      pulling = false;
+    });
+  }
+
+  // This screen's doc (mine) meets the server's newer copy (theirs), over
+  // the copy both started from (base). Unsaved local edits win field by
+  // field; the answer goes onto the screen and, when it holds anything the
+  // server has not saved, straight into the autosave on the newer base.
+  function mergeIn(c, server) {
+    var s = c.saver;
+    if (s.busy()) return; // a save or the conflict sheet is deciding
+    var mine = c.doc;
+    var r = root.M2Merge.merge(s.baseDoc(), mine, server.doc);
+    if (!r.doc) {
+      // Not a map anyone can open: the sheet asks which copy to keep.
+      s.showConflict(server);
+      return;
+    }
+    var redraw = r.changed;
+    var needsSave = !root.M2Merge.sameDoc(r.doc, server.doc);
+    if (redraw && view && view.applyRemote) view.applyRemote(r.doc);
+    s.adopt(server.revision, server.doc);
+    if (needsSave) s.changed(c.doc);
+  }
+
+  // Coming back to the tab, or told to resync: same answer as a doc event.
+  function checkForNewer() {
+    var c = openRef;
+    if (!c || pulling) return;
+    var s = c.saver;
+    if (s && s.inConflict()) { onConflict(s, { doc: c.doc, id: c.id }, c.withoutMaps, null); return; }
+    if (s && s.busy()) return;
+    pullLatest();
   }
 
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible') checkForNewer();
+    if (document.visibilityState === 'visible') {
+      if (liveRef) liveRef.resume(); // the fresh hello pulls the latest
+      else checkForNewer();
+    } else if (liveRef) {
+      liveRef.pause(); // closed stream, leave posted: not on the map
+    }
   });
   // The shell can keep this app loaded but hidden; it says when it shows it.
   window.addEventListener('usernode:visibility-changed', function (e) {
-    if (e.detail && e.detail.hidden === false) checkForNewer();
+    var hidden = !(e.detail && e.detail.hidden === false);
+    if (hidden && liveRef) liveRef.pause();
+    else if (!hidden) {
+      if (liveRef) liveRef.resume();
+      else checkForNewer();
+    }
   });
 
   // A 404 is the same for a deleted map, a private one, a reset link and
@@ -453,7 +563,7 @@
 
   function route() {
     saverRef = null;
-    current = null;
+    openRef = null;
     var hash = location.hash;
     if (hash === '#/maps') { showMaps(); }
     else if (hash === '#/trash') { showTrash(); }

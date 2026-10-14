@@ -103,6 +103,17 @@
       "name": "map.demo-trash-list",
       "path": "/?demo=1#/trash",
       "expectText": "Deletes in"
+    },
+    {
+      "name": "map.demo-live-stream",
+      "path": "/?demo=1",
+      "expectSelector": ".canvas[data-live=\"open\"]"
+    },
+    {
+      "name": "map.shared-link-presence",
+      "path": "/?share=staging-demo-link",
+      "expectSelector": ".topbar .presence .presence-dot",
+      "expectText": "Staging demo friend"
     }
   ]
 }
