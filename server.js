@@ -8,7 +8,7 @@ const jwt = require('jsonwebtoken');
 // UMD, so the browser loads it as window.M2Model and the server requires it.
 const M2Model = require('./public/js/map-model');
 const { exampleDoc } = require('./public/js/example-map');
-const { demoMaps, sharedDemoDoc, trashedDemoDoc } = require('./server/demo-maps');
+const { demoMaps, sharedDemoDoc, trashedDemoDoc, teamRetroDoc } = require('./server/demo-maps');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -167,8 +167,10 @@ app.get('/health', (_req, res) => {
 
 // ── M2's API ─────────────────────────────────────────────────────────────
 // Maps are personal notes, so every table here is staging:private and every
-// write touches only the signed-in person's own rows. A map's owner may let
-// others READ it (see "Sharing" below); nobody but the owner ever writes.
+// write touches only rows the caller is allowed in. A map's owner may let
+// others READ it, or READ and EDIT it (see "Sharing" below): saving goes
+// through one access check, and everything else — delete, sharing, the
+// reader list, the trash — stays owner-only.
 
 async function bootSchema() {
   await pool.query(`
@@ -198,7 +200,8 @@ async function bootSchema() {
       WHERE share_token IS NOT NULL;
     -- The project members a map's owner added; each reads it whatever its
     -- visibility. username comes from the platform's member list, shared_by
-    -- is the owner's username when they added the row.
+    -- is the owner's username when they added the row. role says what the
+    -- person may do: 'viewer' reads, 'editor' also saves the map (#33).
     CREATE TABLE IF NOT EXISTS map_readers (
       map_id     text NOT NULL REFERENCES maps(id) ON DELETE CASCADE,
       user_id    text NOT NULL,
@@ -208,12 +211,22 @@ async function bootSchema() {
       PRIMARY KEY (map_id, user_id)
     );
     CREATE INDEX IF NOT EXISTS map_readers_user ON map_readers (user_id);
+    -- Editors came later than readers, so the column lands on tables the
+    -- CREATE above already made. Every row keeps a role: NOT NULL with a
+    -- default, so nothing is left half-allowed.
+    ALTER TABLE map_readers ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'viewer'
+      CHECK (role IN ('viewer', 'editor'));
     COMMENT ON TABLE map_readers IS 'staging:private';
 
     -- Bumped by every save. A save names the revision it was made from, so
     -- a tab or device holding an older copy is refused instead of
     -- overwriting a newer one (#12).
     ALTER TABLE maps ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 0;
+
+    -- The username of whoever saved the map last, so "Edited by …" can be
+    -- shown to the people it is shared with. Set by every save (#33), never
+    -- by making a map.
+    ALTER TABLE maps ADD COLUMN IF NOT EXISTS updated_by text;
 
     -- A deleted map waits here for 30 days (Recently deleted, #30) before
     -- the hourly purge removes it for good. NULL means active: every read
@@ -246,7 +259,7 @@ async function bootSchema() {
   }
 }
 
-const MAP_COLUMNS = 'id, title, doc, idea_count, created_at, updated_at, revision';
+const MAP_COLUMNS = 'id, title, doc, idea_count, created_at, updated_at, revision, updated_by';
 
 // The made-up person who owns the staging demo's shared maps.
 const DEMO_FRIEND = 'staging-demo-friend';
@@ -261,8 +274,8 @@ function mapSummary(row) {
   };
 }
 
-function mapFull(row) {
-  return {
+function mapFull(row, viewerName) {
+  const full = {
     id: row.id,
     title: row.title,
     doc: row.doc,
@@ -270,6 +283,10 @@ function mapFull(row) {
     updatedAt: row.updated_at.toISOString(),
     revision: row.revision,
   };
+  // Whoever saved last, for "Edited by …" — but not when it is the reader
+  // themselves (their own edit needs no news).
+  if (row.updated_by && row.updated_by !== viewerName) full.editedBy = row.updated_by;
+  return full;
 }
 
 async function insertMap(client, ownerId, doc, now) {
@@ -328,20 +345,35 @@ app.get('/api/maps', async (req, res) => {
         }
       }
       // One fake person's map shared with the viewer, so "Shared with you"
-      // has a row. Idempotent, so it is safe on every ?demo=1 load; the
-      // viewer's own demo maps stay Private.
+      // has a row, and a second shared as an editor, so the Team retro can
+      // be opened and changed. Idempotent, so it is safe on every ?demo=1
+      // load; the viewer's own demo maps stay Private.
       const shared = sharedDemoDoc();
       const sharedId = 'demo-sharedwith-' + ownerId;
       await pool.query(
-        `INSERT INTO maps (id, owner_id, title, doc, idea_count, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $6) ON CONFLICT (id) DO NOTHING`,
+        `INSERT INTO maps (id, owner_id, title, doc, idea_count, created_at, updated_at, updated_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $6, $2) ON CONFLICT (id) DO NOTHING`,
         [sharedId, DEMO_FRIEND, shared.nodes[0].text, JSON.stringify(shared),
           shared.nodes.length, new Date(req.now.getTime() - 3 * 86400000)]
       );
       await pool.query(
-        `INSERT INTO map_readers (map_id, user_id, username, shared_by, added_at)
-         VALUES ($1, $2, $3, $4, $5) ON CONFLICT (map_id, user_id) DO NOTHING`,
+        `INSERT INTO map_readers (map_id, user_id, username, shared_by, added_at, role)
+         VALUES ($1, $2, $3, $4, $5, 'viewer') ON CONFLICT (map_id, user_id) DO NOTHING`,
         [sharedId, ownerId, String(req.user.username || ''), DEMO_FRIEND, req.now]
+      );
+      const retro = teamRetroDoc();
+      const retroId = 'demo-teamretro-' + ownerId;
+      await pool.query(
+        `INSERT INTO maps (id, owner_id, title, doc, idea_count, created_at, updated_at, updated_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $2) ON CONFLICT (id) DO NOTHING`,
+        [retroId, DEMO_FRIEND, retro.nodes[0].text, JSON.stringify(retro),
+          retro.nodes.length, new Date(req.now.getTime() - 26 * 3600000),
+          new Date(req.now.getTime() - 2 * 3600000)]
+      );
+      await pool.query(
+        `INSERT INTO map_readers (map_id, user_id, username, shared_by, added_at, role)
+         VALUES ($1, $2, $3, $4, $5, 'editor') ON CONFLICT (map_id, user_id) DO NOTHING`,
+        [retroId, ownerId, String(req.user.username || ''), DEMO_FRIEND, req.now]
       );
       // One of the viewer's own maps already in Recently deleted, deleted 18
       // days ago, so the trash can be seen without deleting anything first.
@@ -361,9 +393,11 @@ app.get('/api/maps', async (req, res) => {
        WHERE owner_id = $1 AND deleted_at IS NULL ORDER BY updated_at DESC`,
       [ownerId]
     );
-    // Maps other people added this person to, never their own.
+    // Maps other people added this person to, never their own. The role
+    // says what they may do, and updated_by feeds "Edited by …".
     const shared = await pool.query(
-      `SELECT m.id, m.title, m.doc, m.idea_count, m.created_at, m.updated_at, r.shared_by
+      `SELECT m.id, m.title, m.doc, m.idea_count, m.created_at, m.updated_at,
+              m.updated_by, r.role, r.shared_by
        FROM map_readers r JOIN maps m ON m.id = r.map_id
        WHERE r.user_id = $1 AND m.owner_id <> $1 AND m.deleted_at IS NULL
        ORDER BY m.updated_at DESC`,
@@ -380,7 +414,12 @@ app.get('/api/maps', async (req, res) => {
     const welcomed = await pool.query('SELECT 1 FROM profiles WHERE user_id = $1', [ownerId]);
     return res.json({
       maps: rows.rows.map(mapSummary),
-      shared: shared.rows.map(row => Object.assign(mapSummary(row), { sharedBy: row.shared_by })),
+      shared: shared.rows.map(row => Object.assign(mapSummary(row), {
+        sharedBy: row.shared_by,
+        role: row.role,
+        editedBy: row.updated_by && row.updated_by !== String(req.user.username || '')
+          ? row.updated_by : undefined,
+      })),
       welcomed: welcomed.rowCount > 0,
       demo,
       trashed: trashedCount.rows[0].n,
@@ -452,22 +491,22 @@ app.post('/api/maps', async (req, res) => {
 });
 
 // Opening a map: its owner, anyone signed in when it is Public, and the
-// people its owner added. Everyone else, guests included, gets the same 404
-// as a map that doesn't exist, so the answer never says that it does.
-// Guests reach a map only through its secret link (/api/shared/:token).
+// people its owner added (as viewer or editor). Everyone else, guests
+// included, gets the same 404 as a map that doesn't exist, so the answer
+// never says that it does. Guests reach a map only through its secret link
+// (/api/shared/:token).
 app.get('/api/maps/:id', async (req, res) => {
   try {
     if (!req.user) return res.status(404).json({ error: 'Map not found' });
-    const userId = String(req.user.id);
+    const access = await accessOf(req.params.id, String(req.user.id));
+    if (!access) return res.status(404).json({ error: 'Map not found' });
     const row = await pool.query(
-      `SELECT ${MAP_COLUMNS}, owner_id FROM maps m
-       WHERE m.id = $1 AND m.deleted_at IS NULL AND (m.owner_id = $2 OR m.visibility = 'public'
-         OR EXISTS (SELECT 1 FROM map_readers r WHERE r.map_id = m.id AND r.user_id = $2))`,
-      [req.params.id, userId]
+      `SELECT ${MAP_COLUMNS} FROM maps m
+       WHERE m.id = $1 AND m.deleted_at IS NULL`,
+      [req.params.id]
     );
     if (!row.rowCount) return res.status(404).json({ error: 'Map not found' });
-    const access = row.rows[0].owner_id === userId ? 'owner' : 'viewer';
-    return res.json({ map: mapFull(row.rows[0]), access });
+    return res.json({ map: mapFull(row.rows[0], String(req.user.username || '')), access });
   } catch (err) {
     console.error('GET /api/maps/:id failed: ' + err.message);
     return res.status(500).json({ error: 'Could not open the map' });
@@ -477,6 +516,8 @@ app.get('/api/maps/:id', async (req, res) => {
 // A save carries the revision it was made from. When the map has moved on
 // since (another tab or device saved), nothing is written and the answer is
 // 409 with the server's current copy, so the page can ask which to keep.
+// The owner and the people added as editor may save; everyone else gets the
+// same 404 as a missing map.
 app.put('/api/maps/:id', async (req, res) => {
   try {
     const doc = req.body && req.body.doc;
@@ -486,27 +527,41 @@ app.put('/api/maps/:id', async (req, res) => {
     if (base !== undefined && !(Number.isInteger(base) && base >= 0 && base <= 2147483647)) {
       return res.status(400).json({ error: 'bad baseRevision' });
     }
-    const ownerId = String(req.user.id);
+    const userId = String(req.user.id);
     // A missing baseRevision comes from a tab opened before revisions
     // existed: it saves as before (last save wins) but still bumps the
     // revision, so newer tabs notice it. Remove once every client sends one.
     const updated = await pool.query(
       `UPDATE maps SET doc = $3, title = $4, idea_count = $5, updated_at = $6,
-         revision = revision + 1
-       WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
+         updated_by = $8, revision = revision + 1
+       WHERE id = $1 AND deleted_at IS NULL
          AND ($7::int IS NULL OR revision = $7)
+         AND (owner_id = $2 OR EXISTS (SELECT 1 FROM map_readers r
+              WHERE r.map_id = maps.id AND r.user_id = $2 AND r.role = 'editor'))
        RETURNING revision, updated_at`,
-      [req.params.id, ownerId, JSON.stringify(doc), doc.nodes[0].text.trim(),
-        doc.nodes.length, req.now, base === undefined ? null : base]
+      [req.params.id, userId, JSON.stringify(doc), doc.nodes[0].text.trim(),
+        doc.nodes.length, req.now, base === undefined ? null : base,
+        String(req.user.username || '')]
     );
     if (!updated.rowCount) {
+      // Either the map isn't there (or not savable by this person) or it has
+      // moved on since this save was made; accessOf tells which, so the
+      // answer is 404 exactly when the map is missing to this person.
+      const access = await accessOf(req.params.id, userId);
+      if (!access || access === 'viewer') return res.status(404).json({ error: 'Map not found' });
       const current = await pool.query(
-        'SELECT doc, revision FROM maps WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL',
-        [req.params.id, ownerId]
+        'SELECT doc, revision, updated_by FROM maps WHERE id = $1 AND deleted_at IS NULL',
+        [req.params.id]
       );
-      if (!current.rowCount) return res.status(404).json({ error: 'Map not found' });
+      const savedBy = current.rows[0].updated_by;
       return res.status(409).json({
-        error: 'conflict', revision: current.rows[0].revision, doc: current.rows[0].doc,
+        error: 'conflict',
+        revision: current.rows[0].revision,
+        doc: current.rows[0].doc,
+        // Who the page should name as the other editor — unless it was this
+        // person in another tab, which is no news.
+        editedBy: savedBy && savedBy !== String(req.user.username || '')
+          ? savedBy : undefined,
       });
     }
     return res.json({
@@ -623,10 +678,11 @@ async function purgeTrash() {
 // ── Sharing ──────────────────────────────────────────────────────────────
 // A map is Private (NULL or 'private': its owner and the people they add),
 // 'link' (anyone holding its secret link, guests included) or 'public'
-// (anyone signed in who has its link). Everyone but the owner reads it view
-// only: PUT and DELETE above still filter on owner_id. A viewer's responses
-// carry mapFull only; the token and the reader list come only from the
-// owner-only routes below.
+// (anyone signed in who has its link). A person it is shared with is a
+// viewer (reads view only) or an editor (may also save it); only the owner
+// may delete it, change its sharing or its reader list, restore or purge it.
+// A viewer's responses carry mapFull only; the token and the reader list
+// come only from the owner-only routes below.
 
 const VISIBILITIES = ['private', 'link', 'public'];
 
@@ -646,6 +702,28 @@ async function ownedMap(id, userId) {
   return row.rows[0] || null;
 }
 
+// What the person may do with the map: owner > editor > viewer, else null
+// (not on it, a trashed map, or a guest). One access check, so every route
+// asks it the same question and a map someone can't open answers exactly
+// like a missing one. Readers of a 'public' map count as viewers too.
+async function accessOf(mapId, userId) {
+  if (!userId) return null;
+  const row = await pool.query(
+    `SELECT m.owner_id = $2 AS owns, m.visibility,
+            (SELECT role FROM map_readers r
+              WHERE r.map_id = m.id AND r.user_id = $2) AS role
+       FROM maps m
+       WHERE m.id = $1 AND m.deleted_at IS NULL`,
+    [mapId, userId]
+  );
+  if (!row.rowCount) return null;
+  const m = row.rows[0];
+  if (m.owns) return 'owner';
+  if (m.role === 'editor') return 'editor';
+  if (m.role || m.visibility === 'public') return 'viewer';
+  return null;
+}
+
 // The address to hand out: the secret link while visibility is 'link',
 // otherwise the map's own id, which opens only for people allowed in. It goes
 // through the platform's chromeless view, which embeds the app with the
@@ -660,13 +738,13 @@ function shareLink(map) {
 
 async function sharingOf(map) {
   const readers = await pool.query(
-    'SELECT user_id, username FROM map_readers WHERE map_id = $1 ORDER BY added_at, username',
+    'SELECT user_id, username, role FROM map_readers WHERE map_id = $1 ORDER BY added_at, username',
     [map.id]
   );
   return {
     visibility: VISIBILITIES.includes(map.visibility) ? map.visibility : 'private',
     link: shareLink(map),
-    readers: readers.rows.map(r => ({ id: r.user_id, username: r.username })),
+    readers: readers.rows.map(r => ({ id: r.user_id, username: r.username, role: r.role })),
   };
 }
 
@@ -685,8 +763,13 @@ app.get('/api/shared/:token', async (req, res) => {
       [token]
     );
     if (!row.rowCount) return res.json({ map: null });
-    const access = req.user && row.rows[0].owner_id === String(req.user.id) ? 'owner' : 'viewer';
-    return res.json({ map: mapFull(row.rows[0]), access, guest: !req.user });
+    const owner = req.user && row.rows[0].owner_id === String(req.user.id);
+    const role = req.user
+      ? await accessOf(row.rows[0].id, String(req.user.id))
+      : null;
+    const access = owner ? 'owner'
+      : role === 'editor' ? 'editor' : 'viewer';
+    return res.json({ map: mapFull(row.rows[0], String(req.user ? req.user.username || '' : '')), access, guest: !req.user });
   } catch (err) {
     console.error('GET /api/shared/:token failed: ' + err.message);
     return res.status(500).json({ error: 'Could not open the map' });
@@ -811,6 +894,13 @@ app.post('/api/maps/:id/readers', async (req, res) => {
     const userId = typeof raw === 'string' || typeof raw === 'number' ? String(raw) : '';
     if (!userId) return res.status(400).json({ error: 'Choose someone to add' });
     if (userId === ownerId) return res.status(400).json({ error: 'This is already your map' });
+    // What they may do: viewer unless the owner picked editor. Anything
+    // else in the field is an answer, not a guess.
+    const rawRole = req.body ? req.body.role : undefined;
+    const role = rawRole === undefined ? 'viewer' : rawRole;
+    if (role !== 'viewer' && role !== 'editor') {
+      return res.status(400).json({ error: 'Choose Can view or Can edit' });
+    }
     let list;
     try {
       list = await projectMembers(req);
@@ -821,9 +911,9 @@ app.post('/api/maps/:id/readers', async (req, res) => {
     const member = list.members.find(m => m.id === userId);
     if (!member) return res.status(400).json({ error: 'Only project members can be added' });
     await pool.query(
-      `INSERT INTO map_readers (map_id, user_id, username, shared_by, added_at)
-       VALUES ($1, $2, $3, $4, $5) ON CONFLICT (map_id, user_id) DO NOTHING`,
-      [map.id, member.id, member.username, String(req.user.username || ''), req.now]
+      `INSERT INTO map_readers (map_id, user_id, username, shared_by, added_at, role)
+       VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (map_id, user_id) DO NOTHING`,
+      [map.id, member.id, member.username, String(req.user.username || ''), req.now, role]
     );
     return res.json(await sharingOf(map));
   } catch (err) {
@@ -843,6 +933,29 @@ app.delete('/api/maps/:id/readers/:userId', async (req, res) => {
   } catch (err) {
     console.error('DELETE /api/maps/:id/readers failed: ' + err.message);
     return res.status(500).json({ error: 'Could not remove them' });
+  }
+});
+
+// Change what someone may do on the map: Can view or Can edit. A person not
+// on the map gets the same 404 as a missing one.
+app.patch('/api/maps/:id/readers/:userId', async (req, res) => {
+  try {
+    const map = await ownedMap(req.params.id, String(req.user.id));
+    if (!map) return res.status(404).json({ error: 'Map not found' });
+    const role = req.body && req.body.role;
+    if (role !== 'viewer' && role !== 'editor') {
+      return res.status(400).json({ error: 'Choose Can view or Can edit' });
+    }
+    const changed = await pool.query(
+      `UPDATE map_readers SET role = $3
+       WHERE map_id = $1 AND user_id = $2 RETURNING user_id, username, role`,
+      [map.id, req.params.userId, role]
+    );
+    if (!changed.rowCount) return res.status(404).json({ error: 'Not on this map' });
+    return res.json(await sharingOf(map));
+  } catch (err) {
+    console.error('PATCH /api/maps/:id/readers/:userId failed: ' + err.message);
+    return res.status(500).json({ error: 'Could not change what they can do' });
   }
 });
 

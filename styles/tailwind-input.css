@@ -557,15 +557,33 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* The same pale pill in a map-list row: what you may do with a map
+     someone shared with you. It never trades places with the name. */
+  .role-pill {
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 500;
+    color: rgb(var(--muted));
+    background: rgb(var(--raised));
+    border-radius: 999px;
+    padding: 4px 10px;
+    flex: none;
+    white-space: nowrap;
+  }
   .top-pills {
     display: flex;
     gap: 6px;
     min-width: 0;
   }
   /* Below 480 px the Maps and Share buttons keep their icons and their
-     aria-labels only, so Fit and the undo and redo buttons stay on screen. */
+     aria-labels only, so Fit and the undo and redo buttons stay on screen.
+     The "Edited by …" status is the first thing to go: it is news, not
+     control, and it is still in the list of maps. */
   @media (max-width: 479px) {
     .topbar .btn-label {
+      display: none;
+    }
+    .topbar .save-status.is-edited {
       display: none;
     }
   }

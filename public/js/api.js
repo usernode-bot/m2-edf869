@@ -37,5 +37,26 @@
     });
   }
 
-  root.M2Api = { api: api, isDemo: isDemo };
+  // "Just now", "5 min ago", "2 h ago", "Yesterday", "3 days ago", then a date.
+  // Read the staging preview clock when one is set, so demo ages match the
+  // demo data. Lived in maps-list.js first, then "Edited by …" needed it on
+  // the canvas too.
+  function relativeTime(iso) {
+    var now = root.usernode && root.usernode.now ? root.usernode.now() : new Date();
+    var then = new Date(iso);
+    var s = Math.max(0, (now.getTime() - then.getTime()) / 1000);
+    if (s < 60) return 'Just now';
+    if (s < 3600) return Math.floor(s / 60) + ' min ago';
+    if (s < 86400) return Math.floor(s / 3600) + ' h ago';
+    var days = Math.floor(s / 86400);
+    var yesterday = new Date(now.getTime() - 86400000);
+    var sameDay = function (a, b) {
+      return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+    };
+    if (days === 1 && sameDay(yesterday, then)) return 'Yesterday';
+    if (days < 7) return days + ' days ago';
+    return then.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+  }
+
+  root.M2Api = { api: api, isDemo: isDemo, relativeTime: relativeTime };
 })(typeof self !== 'undefined' ? self : this);

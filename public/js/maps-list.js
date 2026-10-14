@@ -27,23 +27,10 @@
     return span.firstChild;
   }
 
-  // "Just now", "5 min ago", "2 h ago", "Yesterday", "3 days ago", then a date.
-  function relativeTime(iso) {
-    var now = root.usernode && root.usernode.now ? root.usernode.now() : new Date();
-    var then = new Date(iso);
-    var s = Math.max(0, (now.getTime() - then.getTime()) / 1000);
-    if (s < 60) return 'Just now';
-    if (s < 3600) return Math.floor(s / 60) + ' min ago';
-    if (s < 86400) return Math.floor(s / 3600) + ' h ago';
-    var days = Math.floor(s / 86400);
-    var yesterday = new Date(now.getTime() - 86400000);
-    var sameDay = function (a, b) {
-      return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-    };
-    if (days === 1 && sameDay(yesterday, then)) return 'Yesterday';
-    if (days < 7) return days + ' days ago';
-    return then.toLocaleDateString('en', { month: 'short', day: 'numeric' });
-  }
+  // "Just now", "5 min ago", "2 h ago", "Yesterday", "3 days ago", then a
+  // date. Lives in api.js now, so the canvas's "Edited by …" says ages the
+  // same way this list does.
+  var relativeTime = root.M2Api.relativeTime;
 
   // The map's branches, drawn small: a central ink dot and one curve per
   // main idea in its colour.
@@ -222,7 +209,9 @@
     }
 
     // One map's row: the thumbnail, the name that opens it, a line under
-    // the name and when it was last edited.
+    // the name and when it was last edited. A shared row also says what you
+    // may do there (a small pill by the name) and, when someone else saved
+    // it since you looked, who — that line then stands in for the time.
     function mapRow(map, meta) {
       var row = el('li', 'list-row');
       row.appendChild(thumbSvg(map.outline));
@@ -233,15 +222,29 @@
       var nameBtn = el('button');
       nameBtn.type = 'button';
       nameBtn.style.cssText = 'display:block;width:100%;min-height:44px;text-align:left;background:none;border:0;padding:0;font:inherit;color:inherit;cursor:pointer';
+      var nameRow = el('div');
+      nameRow.style.cssText = 'display:flex;align-items:center;gap:8px;min-width:0';
       var name = el('p', 'text-body font-semibold', map.title);
       name.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
-      nameBtn.appendChild(name);
+      nameRow.appendChild(name);
+      if (map.role) {
+        nameRow.appendChild(el('span', 'role-pill',
+          map.role === 'editor' ? 'Can edit' : 'Can view'));
+      }
+      nameBtn.appendChild(nameRow);
       nameBtn.appendChild(el('p', 'text-small text-muted', meta));
-      nameBtn.setAttribute('aria-label', 'Open ' + map.title + ', ' + meta);
+      var spoken = 'Open ' + map.title + ', ' + meta;
+      if (map.role) spoken += ', ' + (map.role === 'editor' ? 'you can edit' : 'you can view');
+      var when = null;
+      if (map.editedBy) {
+        when = 'Edited by ' + map.editedBy + ', ' + relativeTime(map.updatedAt);
+        nameBtn.appendChild(el('p', 'text-small text-muted', when));
+      }
+      nameBtn.setAttribute('aria-label', when ? spoken + ', ' + when : spoken);
       nameBtn.addEventListener('click', function () { opts.onOpen(map.id); });
       textCol.appendChild(nameBtn);
       row.appendChild(textCol);
-      row.appendChild(el('span', 'text-small text-muted', relativeTime(map.updatedAt)));
+      if (!when) row.appendChild(el('span', 'text-small text-muted', relativeTime(map.updatedAt)));
       return row;
     }
 
@@ -249,8 +252,9 @@
       return map.ideaCount + (map.ideaCount === 1 ? ' idea' : ' ideas');
     }
 
-    // Maps other people shared with you, view only: no more-menu and no
-    // swipe, since only their owner can rename or delete them.
+    // Maps other people shared with you: no more-menu and no swipe, since
+    // only their owner can rename or delete them. The row says what you may
+    // do (the pill) and who changed it last when that wasn't you.
     function renderShared() {
       if (guest || !sharedData.length) return;
       var label = el('h2', 'section-label', 'Shared with you');
