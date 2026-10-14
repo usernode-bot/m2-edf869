@@ -169,6 +169,17 @@ function sharedDemoDoc() {
   ]);
 }
 
+// A second made-up friend's map, shared with the viewer as an editor, so
+// "Shared with you" has a map that can be changed, and "Edited by …" a
+// reason to show. Staging only.
+function teamRetroDoc() {
+  return buildDoc('Staging demo: Team retro', [
+    ['Went well', ['Clear sprint goal', 'Pairing on bugs']],
+    ['To improve', ['Fewer meetings', 'Earlier reviews']],
+    ['Next steps', ['Rotate the host', 'Share notes Friday']],
+  ]);
+}
+
 // The staging demo's trashed map, seeded into the viewer's own Recently
 // deleted 18 days ago (so "Deletes in 12 days") on every ?demo=1 load.
 function trashedDemoDoc() {
@@ -180,4 +191,4 @@ function trashedDemoDoc() {
   ]);
 }
 
-module.exports = { demoMaps, lisbonDoc, lisbonVersions, sharedDemoDoc, trashedDemoDoc };
+module.exports = { demoMaps, lisbonDoc, lisbonVersions, sharedDemoDoc, teamRetroDoc, trashedDemoDoc };

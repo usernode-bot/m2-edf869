@@ -101,8 +101,11 @@ Build modern, easy-to-use mind maps. M2 is for thinking on paper: a map
 grows out from one central idea, each main idea gets its own colour, and
 its branches curve outward and thin as they go. Maps are personal notes,
 private by default, and they save on their own as you work. A map's owner
-can share it view only (Private plus the people they add, Anyone with the
-link, or Public); nobody but the owner ever changes it. The canvas is the app: everything else (Your maps, the sheets, the
+can share it with people they add, either view only or for editing
+(Private plus the people they add, Anyone with the link, or Public);
+nobody else ever changes it — a chosen editor saves through the same
+revision-checked PUT as the owner, delete, sharing and the reader list
+stay the owner's alone. The canvas is the app: everything else (Your maps, the sheets, the
 save status) stays out of its way.
 
 ## Design
@@ -179,14 +182,23 @@ Re-theme by changing the token values there, keeping every text pair at
 - The map's title mirrors its root idea's text; `maps.title` exists so
   Your maps can sort and label without opening every doc.
 - `maps`, `profiles`, `demo_seeds` and `map_readers` are
-  `staging:private`: maps are personal notes. Every write route stays
-  owner-only (filtered on `owner_id`); reading someone else's map goes
-  through one access check in `GET /api/maps/:id` (Public, or a
-  `map_readers` row) or the secret link (`GET /api/shared/:token`). A map
-  someone can't open answers exactly like a missing one, never 403, and a
-  viewer's responses never carry `share_token` or the reader list. Guests
-  get the example map in memory, never stored, and open a shared map only
-  by its secret link.
+  `staging:private`: maps are personal notes. Reading someone else's map
+  goes through one access helper, `accessOf(mapId, userId)` in
+  `server.js` → `'owner' | 'editor' | 'viewer' | null` (owner first, then
+  the `map_readers` row, then Public), used by `GET /api/maps/:id`, the
+  PUT fallback and the secret link. A map someone can't open answers
+  exactly like a missing one, never 403, and a viewer's responses never
+  carry `share_token` or the reader list. Guests get the example map in
+  memory, never stored, and open a shared map only by its secret link.
+- Sharing is per person: `map_readers.role` is `'viewer'` or `'editor'`
+  (default viewer). An editor saves like an owner through
+  `PUT /api/maps/:id` (same revision check) and that save sets
+  `maps.updated_by`; every other write route — delete, trash, restore,
+  purge, visibility, the link, adding, changing or removing readers —
+  stays owner-only and 404s for an editor, same as for a stranger. Any
+  future route that changes `doc` must allow owner AND editor and set
+  `updated_by`; a route that demotes or removes an editor's access takes
+  effect on their next save (404), never a 403.
 - `maps.visibility` is NULL or `'private'` (Private), `'link'` or
   `'public'`. `share_token` exists only while it is `'link'`; switching
   away nulls it and Reset link replaces it. People are added from the

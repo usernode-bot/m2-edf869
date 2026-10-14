@@ -7,6 +7,7 @@
 (function (root) {
   'use strict';
   var M = root.M2Model;
+  var relativeTime = root.M2Api.relativeTime;
   var doc = null; // set per view, below
 
   var COLOR_CLASSES = ['c-teal', 'c-amber', 'c-violet', 'c-rose', 'c-sky', 'c-green', 'c-orange', 'c-indigo', 'c-pink', 'c-slate'];
@@ -482,13 +483,21 @@
 
     var saveFailing = false; // said once when saving starts to fail, once when it recovers
     function setStatus(kind) {
-      statusEl.hidden = readOnly || kind === 'none';
+      // "Edited by …" is news about the paper, so it shows on read-only
+      // views too; the save kinds are this viewer's own work, which a
+      // read-only view never has.
+      statusEl.hidden = kind === 'none' || (readOnly && kind !== 'edited');
       statusEl.classList.toggle('is-error', kind === 'error' || kind === 'conflict');
+      statusEl.classList.toggle('is-edited', kind === 'edited');
       if (kind === 'saving') { statusEl.textContent = 'Saving'; }
       else if (kind === 'saved') { statusEl.textContent = ''; statusEl.appendChild(icon('check')); statusEl.appendChild(document.createTextNode('Saved')); }
       else if (kind === 'error') { statusEl.textContent = 'Not saved'; }
       else if (kind === 'conflict') { statusEl.textContent = 'Changed elsewhere'; }
       else if (kind === 'guest') { statusEl.textContent = 'Sign in to save'; }
+      else if (kind === 'edited') {
+        statusEl.textContent = 'Edited by ' + opts.editedBy.name + ', '
+          + relativeTime(opts.editedBy.at);
+      }
       else { statusEl.textContent = ''; }
       // The save status speaks at its edges only: when saving starts to
       // fail, and when it recovers. Retries (error, saving, error) stay
@@ -497,6 +506,9 @@
       else if (kind === 'saved' && saveFailing) { saveFailing = false; announce('Saved'); }
     }
     setStatus(opts.initialStatus || 'none');
+    // A map someone else just saved opens with the news: who and when. The
+    // first save here (Saving) replaces it.
+    if (opts.editedBy) setStatus('edited');
 
     // ── Live co-editing (#34) ────────────────────────────────────────────
     // The stream's state shows as data-live on the canvas: open, connecting
@@ -1860,6 +1872,9 @@
       if (menu.hidden) return;
       var isRoot = n.id === 'root';
       var deleteText = isRoot ? 'Delete map' : 'Delete';
+      // A shared map's editor may change the paper but not trash it, so the
+      // root's Delete map row only shows for the owner.
+      deleteItem.btn.hidden = isRoot && !opts.onDeleteMap;
       deleteItem.label.textContent = deleteText;
       deleteItem.btn.title = deleteText;
       addItem.btn.disabled = cannotAdd;
@@ -2319,6 +2334,9 @@
       var n = selNode();
       if (!n) return;
       if (n.id === 'root') {
+        // An editor may change a shared map but not trash it; the menu row
+        // is hidden, so this guard is for the toolbar and key paths.
+        if (!opts.onDeleteMap) return;
         un.alert({
           title: 'Delete ' + d.nodes[0].text.trim() + '?',
           message: 'It stays in Recently deleted for 30 days.',
@@ -3158,25 +3176,34 @@
 
   // The sheet shown when a save was refused because the map changed in
   // another tab or on another device (#12): keep the newer copy, keep this
-  // one, or save this one as a copy. Each button closes the sheet, then runs
-  // its handler; closing it any other way calls onDismiss. Returns the
-  // sheet's handle.
+  // one, or save this one as a copy. opts.who names the other editor when
+  // the server said who it was, so the sheet can say theirs instead of
+  // "another device". Each button closes the sheet, then runs its handler;
+  // closing it any other way calls onDismiss. Returns the sheet's handle.
   function conflictSheet(opts) {
+    var who = opts.who;
+    var elsewhere = who ? who + ' changed this map.' : 'This map changed on another device.';
+    var seeTheirs = who
+      ? 'Load the latest to see ' + who + '’s version, or keep yours and replace it.'
+      : 'Load the latest to see the other version, or keep yours and replace it.';
     if (!root.unNative) {
       // Without the kit there is no sheet to put buttons in: OK loads the
       // latest, Cancel leaves the map in conflict.
       setTimeout(function () {
-        if (window.confirm('This map changed on another device. Load the latest? Your changes here will be dropped.')) opts.onLoadLatest();
-        else opts.onDismiss();
+        if (window.confirm(elsewhere + ' Load the latest? Your changes here will be dropped.')) {
+          opts.onLoadLatest();
+        } else {
+          opts.onDismiss();
+        }
       }, 0);
       return { dismiss: function () {} };
     }
     var chosen = false;
     var col = el('div');
     col.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding:4px 4px 12px';
-    col.appendChild(el('h2', 'text-heading', 'This map changed on another device.'));
+    col.appendChild(el('h2', 'text-heading', elsewhere));
     var note = el('p', 'text-small text-muted',
-      'Your latest changes here aren’t saved yet. Load the latest to see the other version, or keep yours and replace it.');
+      'Your latest changes here aren’t saved yet. ' + seeTheirs);
     note.style.marginBottom = '8px';
     col.appendChild(note);
     var handle = null;

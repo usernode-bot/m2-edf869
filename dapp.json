@@ -75,6 +75,11 @@
       "expectText": "Shared with you"
     },
     {
+      "name": "map.demo-shared-editor",
+      "path": "/?demo=1#/maps",
+      "expectText": "Can edit"
+    },
+    {
       "name": "map.demo-tidy-button",
       "path": "/?demo=1",
       "expectSelector": ".topbar .tidy-btn"

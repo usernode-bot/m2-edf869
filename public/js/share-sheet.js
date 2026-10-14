@@ -1,9 +1,9 @@
 /* The Share sheet: who can open a map (Private, Anyone with the link,
  * Public), its link with Copy and Reset, and the project members it is
- * shared with. Everyone it is shared with reads the map view only. Only the
- * map's owner sees the Share button, and every call here is an owner-only
- * route. Loads its own data, so it shows honest loading, error and loaded
- * states. All text reaches the DOM through textContent. */
+ * shared with — each as Can view or Can edit. Only the map's owner sees the
+ * Share button, and every call here is an owner-only route. Loads its own
+ * data, so it shows honest loading, error and loaded states. All text
+ * reaches the DOM through textContent. */
 (function (root) {
   'use strict';
   var api = root.M2Api.api;
@@ -71,7 +71,7 @@
     var base = '/api/maps/' + encodeURIComponent(mapId) + '/sharing';
     var readersBase = '/api/maps/' + encodeURIComponent(mapId) + '/readers';
     var n = ++uid;
-    var state = null; // { visibility, link, readers: [{ id, username }] }
+    var state = null; // { visibility, link, readers: [{ id, username, role }] }
 
     var wrap = sheetColumn();
     var heading = el('h2', 'text-heading', 'Share ' + title);
@@ -178,6 +178,12 @@
 
     function renderPeople() {
       peopleList.textContent = '';
+      // The owner first, so the list reads like a room: you, then everyone
+      // you let in, with what each may do.
+      var you = el('li', 'list-row');
+      you.appendChild(el('p', 'text-body font-semibold', 'You'));
+      you.appendChild(el('span', 'role-pill', 'Owner'));
+      peopleList.appendChild(you);
       if (!state.readers.length) {
         peopleList.appendChild(el('li', 'list-row text-small text-muted', 'No one added yet'));
         return;
@@ -187,6 +193,27 @@
         var name = el('p', 'text-body font-semibold', reader.username);
         name.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
         row.appendChild(name);
+        // What they may do, changed with one tap: the button reads the
+        // current answer and opens the two choices.
+        var roleBtn = button('btn-secondary', reader.role === 'editor' ? 'Can edit' : 'Can view');
+        roleBtn.setAttribute('aria-label', 'Change what ' + reader.username
+          + ' can do, now ' + (reader.role === 'editor' ? 'Can edit' : 'Can view'));
+        roleBtn.addEventListener('click', function () {
+          if (root.unNative && root.unNative.popover) {
+            roleBtn.disabled = true;
+            root.unNative.popover({
+              anchorEl: roleBtn,
+              items: [
+                { label: 'Can view', handler: function () { setRole(reader, 'viewer', roleBtn); } },
+                { label: 'Can edit', handler: function () { setRole(reader, 'editor', roleBtn); } },
+              ],
+            }).then(function () { roleBtn.disabled = false; });
+          } else {
+            // No kit, no popover: the button itself picks the other role.
+            setRole(reader, reader.role === 'editor' ? 'viewer' : 'editor', roleBtn);
+          }
+        });
+        row.appendChild(roleBtn);
         var remove = button('btn-secondary', 'Remove');
         remove.setAttribute('aria-label', 'Remove ' + reader.username);
         remove.addEventListener('click', function () {
@@ -202,6 +229,19 @@
         row.appendChild(remove);
         peopleList.appendChild(row);
       });
+    }
+
+    // One PATCH at a time; the sheet re-renders from the answer. A failure
+    // puts the button back on what the server holds.
+    function setRole(reader, role, roleBtn) {
+      api('PATCH', readersBase + '/' + encodeURIComponent(reader.id), { role: role })
+        .then(function (r) {
+          state.readers = r.readers;
+          renderPeople();
+        }).catch(function () {
+          roleBtn.disabled = false;
+          un.toast('Couldn’t change what ' + reader.username + ' can do');
+        });
     }
 
     // ── Who can open it ──────────────────────────────────────────────────
@@ -268,6 +308,9 @@
     // ── Add people ───────────────────────────────────────────────────────
     // The project's members, as the platform lists them; you can't add
     // anyone outside the project, or yourself (the list leaves you out).
+    // One "Add them as" answer applies to every Add pressed while the
+    // sheet is open: Can edit first, since sharing for editing is why
+    // this sheet got the question.
     function openAddPeople() {
       var col = sheetColumn();
       col.appendChild(el('h2', 'text-heading', 'Add people'));
@@ -275,6 +318,54 @@
       inner.style.cssText = 'display:flex;flex-direction:column;gap:8px';
       col.appendChild(inner);
       un.presentSheet({ contentEl: col });
+
+      var m = ++uid;
+      var asRole = 'editor';
+      var asChoices = [
+        { value: 'editor', title: 'Can edit', note: 'They can change the map' },
+        { value: 'viewer', title: 'Can view', note: 'They can look, not change it' },
+      ];
+      var asLabel = el('label', 'section-label', 'Add them as');
+      asLabel.htmlFor = 'share-as-' + m;
+      inner.appendChild(asLabel);
+      var asGroup = el('div', 'list');
+      asGroup.setAttribute('role', 'radiogroup');
+      asGroup.setAttribute('aria-labelledby', asLabel.id);
+      asChoices.forEach(function (choice) {
+        var row = el('label', 'list-row');
+        row.style.cursor = 'pointer';
+        var input = el('input', 'choice');
+        input.type = 'radio';
+        input.name = 'share-as-' + m;
+        input.value = choice.value;
+        input.checked = asRole === choice.value;
+        input.addEventListener('change', function () {
+          if (input.checked) {
+            asRole = choice.value;
+            // The Add buttons say what pressing them would do.
+            listArea.querySelectorAll('button[aria-label]').forEach(function (b) {
+              var label = b.getAttribute('aria-label');
+              if (label.indexOf(', as ') !== -1 && label.indexOf('Added ') !== 0) {
+                b.setAttribute('aria-label',
+                  label.slice(0, label.indexOf(', as ')) + ', as '
+                  + (asRole === 'editor' ? 'Can edit' : 'Can view'));
+              }
+            });
+          }
+        });
+        row.appendChild(input);
+        var text = el('div');
+        text.style.cssText = 'flex:1;min-width:0';
+        text.appendChild(el('p', 'text-body font-semibold', choice.title));
+        text.appendChild(el('p', 'text-small text-muted', choice.note));
+        row.appendChild(text);
+        asGroup.appendChild(row);
+      });
+      inner.appendChild(asGroup);
+      inner.appendChild(el('p', 'section-label', 'Project members'));
+      var listArea = el('div');
+      listArea.style.cssText = 'display:flex;flex-direction:column;gap:8px';
+      inner.appendChild(listArea);
 
       function isReader(id) {
         return state.readers.some(function (r) { return r.id === id; });
@@ -287,10 +378,11 @@
         row.appendChild(name);
         var btn = button('btn-secondary', isReader(member.id) ? 'Added' : 'Add');
         btn.disabled = isReader(member.id);
-        btn.setAttribute('aria-label', (btn.disabled ? 'Added ' : 'Add ') + member.username);
+        btn.setAttribute('aria-label', (btn.disabled ? 'Added ' : 'Add ') + member.username
+          + ', as ' + (asRole === 'editor' ? 'Can edit' : 'Can view'));
         btn.addEventListener('click', function () {
           btn.disabled = true;
-          api('POST', readersBase, { userId: member.id }).then(function (r) {
+          api('POST', readersBase, { userId: member.id, role: asRole }).then(function (r) {
             state.readers = r.readers;
             renderPeople();
             btn.textContent = 'Added';
@@ -305,26 +397,26 @@
       }
 
       function loadMembers() {
-        inner.textContent = '';
-        inner.appendChild(skeletonList(3));
+        listArea.textContent = '';
+        listArea.appendChild(skeletonList(3));
         api('GET', '/api/members').then(function (r) {
-          inner.textContent = '';
+          listArea.textContent = '';
           if (!r.available) {
-            inner.appendChild(el('p', 'text-small text-muted',
+            listArea.appendChild(el('p', 'text-small text-muted',
               'Only project members can be added, and the list isn’t available here.'));
             return;
           }
           if (!r.members.length) {
-            inner.appendChild(el('p', 'text-small text-muted', 'No one else is in this project yet.'));
+            listArea.appendChild(el('p', 'text-small text-muted', 'No one else is in this project yet.'));
             return;
           }
           var list = el('ul', 'list');
           list.style.cssText = 'max-height:50vh;overflow-y:auto;overscroll-behavior:contain;touch-action:pan-y';
-          r.members.forEach(function (m) { list.appendChild(addRow(m)); });
-          inner.appendChild(list);
+          r.members.forEach(function (mem) { list.appendChild(addRow(mem)); });
+          listArea.appendChild(list);
         }).catch(function () {
-          inner.textContent = '';
-          inner.appendChild(errorState(
+          listArea.textContent = '';
+          listArea.appendChild(errorState(
             'Couldn’t load the project members.',
             'Link sharing still works.',
             loadMembers

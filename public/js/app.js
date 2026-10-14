@@ -98,9 +98,12 @@
         state.inFlight = false;
         if (state.dead) return;
         if (err.status === 404) {
-          // The map was deleted while a save waited; drop it quietly.
+          // The map was deleted while a save waited; drop it quietly. An
+          // editor it happened to, though, is still looking at a live map:
+          // reopen it, which lands them back where their access allows.
           state.dead = true;
           state.dirty = false;
+          if (opts.onGone) opts.onGone();
           return;
         }
         if (err.status === 409) { enterConflict(err.body); return; }
@@ -157,6 +160,7 @@
             } else if (res.status === 404) {
               state.dead = true;
               state.dirty = false;
+              if (opts.onGone) opts.onGone();
             } else if (res.status === 409) {
               enterConflict(resp);
             } else {
@@ -215,6 +219,7 @@
 
   // ── One map ──────────────────────────────────────────────────────────
   var saverRef = null;
+  var current = null; // { map, withoutMaps, saver, mode } for the open owner or editor map
   var openRef = null; // { id, doc, mode, withoutMaps, saver, fetchPath } for the map on screen
   var conflictOpen = false; // the conflict sheet is on screen
   var liveRef = null; // the map's live stream, when one is open
@@ -234,16 +239,26 @@
   // nothing of theirs.
   function showMap(map, mode, withoutMaps) {
     var owner = mode === 'owner';
+    var editor = mode === 'editor';
     var guest = mode === 'guest';
     var v = null;
-    var saver = owner ? makeSaver({
+    var saver = (owner || editor) ? makeSaver({
       mapId: map.id,
       revision: map.revision,
+      // An editor whose map disappears (the owner trashed it, or took their
+      // access away) reopens it: they land back where their access now
+      // allows. An owner's own deleted map is today's quiet drop.
+      onGone: editor ? function () {
+        if (saverRef === saver) openMapById(map.id);
+      } : null,
       doc: map.doc,
       setStatus: function (kind) { if (v) v.setStatus(kind); },
-      onConflict: function (server) { onConflict(saver, map, withoutMaps, server); },
+      onConflict: function (server) { onConflict(saver, map, withoutMaps, server, mode); },
     }) : null;
     saverRef = saver;
+    current = (owner || editor)
+      ? { map: map, withoutMaps: withoutMaps, saver: saver, mode: mode }
+      : null;
     openRef = guest ? null : {
       id: map.id,
       doc: map.doc,
@@ -266,13 +281,17 @@
       mapId: guest ? null : map.id,
       readOnly: mode === 'viewer',
       initialStatus: guest ? 'guest' : 'none',
+      // Who the paper says edited it last, for "Edited by …" on a map
+      // someone else just saved.
+      editedBy: map.editedBy && map.updatedAt
+        ? { name: map.editedBy, at: map.updatedAt } : null,
       onOpenMaps: withoutMaps ? null : function () { location.hash = '#/maps'; },
       onShare: owner ? function () { root.M2ShareSheet(map.id, map.doc.nodes[0].text.trim()); } : null,
       onSelect: guest ? null : function (id) { if (liveRef) liveRef.setSelection(id); },
       onVersionHistory: owner ? function () {
         root.M2VersionSheet(map.id, { onOpen: showVersion });
       } : null,
-      onDeleteMap: function () {
+      onDeleteMap: owner ? function () {
         // Anything still unsaved goes first, so the trashed copy has it.
         if (saver) saver.flushNow();
         api('DELETE', '/api/maps/' + map.id).then(function () {
@@ -292,7 +311,7 @@
         }).catch(function () {
           if (v) v.setStatus('error');
         });
-      },
+      } : null,
       onChange: function () {
         if (saver) saver.changed(map.doc);
       },
@@ -411,7 +430,7 @@
     return api('GET', '/api/maps/' + encodeURIComponent(mapId)).then(function (r) { return r.map; });
   }
 
-  function onConflict(saver, map, withoutMaps, server) {
+  function onConflict(saver, map, withoutMaps, server, mode) {
     var title = map.doc.nodes[0].text.trim();
     if (saverRef !== saver) {
       // A last save sent while leaving this map was turned down; the newer
@@ -423,12 +442,16 @@
     if (conflictOpen) return;
     conflictOpen = true;
     root.M2Canvas.conflictSheet({
+      who: server && server.editedBy,
       onLoadLatest: function () {
         conflictOpen = false;
         serverCopy(map.id, server).then(function (latest) {
           if (saverRef !== saver) return;
           saver.drop();
-          showMap({ id: map.id, doc: latest.doc, revision: latest.revision }, 'owner', withoutMaps);
+          showMap({
+            id: map.id, doc: latest.doc, revision: latest.revision,
+            updatedAt: latest.updatedAt, editedBy: latest.editedBy,
+          }, mode, withoutMaps);
         }).catch(function () {
           toast('Couldn’t load the latest version');
         });
@@ -452,7 +475,7 @@
           location.hash = '#/map/' + r.map.id;
         }).catch(function () {
           toast('Couldn’t save a copy');
-          if (saverRef === saver) onConflict(saver, map, withoutMaps, server);
+          if (saverRef === saver) onConflict(saver, map, withoutMaps, server, mode);
         });
       },
       onDismiss: function () { conflictOpen = false; },
@@ -499,7 +522,7 @@
       if (openRef !== c) return; // the screen moved on meanwhile
       var server = r.map;
       if (!server || !server.doc) return;
-      if (c.mode !== 'owner') {
+      if (c.mode !== 'owner' && c.mode !== 'editor') {
         // View only: whatever the server holds is what everyone sees.
         if (view && view.applyRemote) view.applyRemote(server.doc);
         return;
@@ -536,7 +559,7 @@
     var c = openRef;
     if (!c || pulling) return;
     var s = c.saver;
-    if (s && s.inConflict()) { onConflict(s, { doc: c.doc, id: c.id }, c.withoutMaps, null); return; }
+    if (s && s.inConflict()) { onConflict(s, { doc: c.doc, id: c.id }, c.withoutMaps, null, c.mode); return; }
     if (s && s.busy()) return;
     pullLatest();
   }
@@ -575,7 +598,7 @@
   function openMapById(id) {
     render(root.M2Canvas.loadingEl());
     api('GET', '/api/maps/' + encodeURIComponent(id)).then(function (r) {
-      showMap(r.map, r.access === 'owner' ? 'owner' : 'viewer', false);
+      showMap(r.map, r.access === 'owner' || r.access === 'editor' ? r.access : 'viewer', false);
     }).catch(function (err) {
       mapError(err, function () { openMapById(id); });
     });
@@ -587,7 +610,7 @@
     api('GET', '/api/shared/' + encodeURIComponent(token)).then(function (r) {
       // A dead link answers { map: null } rather than a 404 (see server.js).
       if (!r.map) { mapError({ status: 404 }); return; }
-      showMap(r.map, r.access === 'owner' ? 'owner' : 'viewer', !!r.guest);
+      showMap(r.map, r.access === 'owner' || r.access === 'editor' ? r.access : 'viewer', !!r.guest);
     }).catch(function (err) {
       mapError(err, function () { openShared(token); });
     });
@@ -667,6 +690,7 @@
   function route() {
     saverRef = null;
     openRef = null;
+    current = null;
     var hash = location.hash;
     if (hash === '#/maps') { showMaps(); }
     else if (hash === '#/trash') { showTrash(); }
