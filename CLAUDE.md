@@ -234,6 +234,14 @@ Re-theme by changing the token values there, keeping every text pair at
   idea holds `tabindex="0"` (the roving stop chosen by `rovingId`). A new
   edit path ends in `commit()` and gets its announcement for free — no
   second code path may set `aria-label` or speak its own way.
+- Earlier versions live in `map_versions` (staging:private). A version is
+  kept by the PUT save and by restore, inside their transactions, through
+  `M2Model.versionReason` (big delete, or 10 minutes since the last one);
+  the previous doc is written before the map changes. Any future write
+  route that changes `doc` (an import, an AI write) inserts the previous
+  doc first, with its own reason, so history never skips. The three
+  version routes are owner-only and answer 404 exactly like a missing map;
+  restore answers 409 on a stale `baseRevision`, like the PUT save.
 - Deleting a map soft-deletes it: `maps.deleted_at` is set (from `req.now`),
   and every map route filters `AND deleted_at IS NULL` so a trashed map
   answers 404 for everyone, exactly like a missing one. It is kept 30 days

@@ -21,6 +21,7 @@
 
   function destroyView() {
     if (liveRef) { liveRef.close(); liveRef = null; }
+    closeVersion();
     if (view) { view.destroy(); view = null; }
   }
 
@@ -182,6 +183,13 @@
         if (typeof revision === 'number') state.base = revision;
         state.baseDoc = JSON.parse(JSON.stringify(doc));
       },
+      // The map was restored over this screen's copy: adopt the server's
+      // revision without sending anything (the restore already saved).
+      rebase: function (revision) {
+        state.base = revision;
+        state.conflict = false;
+        state.failures = 0;
+      },
       // A newer copy was found without a refused save (coming back to the
       // tab with unsaved edits): same state as a 409.
       showConflict: function (server) { enterConflict(server); },
@@ -211,6 +219,9 @@
   var conflictOpen = false; // the conflict sheet is on screen
   var liveRef = null; // the map's live stream, when one is open
   var pulling = false; // one latest-version fetch at a time
+  var versionView = null; // the version being viewed over the open map
+  var versionHost = null;
+  var versionMode = null; // { map, saver, label } while a version is open
 
   function toast(message, opts) {
     if (root.unNative) root.unNative.toast(message, opts);
@@ -258,6 +269,9 @@
       onOpenMaps: withoutMaps ? null : function () { location.hash = '#/maps'; },
       onShare: owner ? function () { root.M2ShareSheet(map.id, map.doc.nodes[0].text.trim()); } : null,
       onSelect: guest ? null : function (id) { if (liveRef) liveRef.setSelection(id); },
+      onVersionHistory: owner ? function () {
+        root.M2VersionSheet(map.id, { onOpen: showVersion });
+      } : null,
       onDeleteMap: function () {
         // Anything still unsaved goes first, so the trashed copy has it.
         if (saver) saver.flushNow();
@@ -295,6 +309,95 @@
       });
     }
     window.addEventListener('pagehide', onPageHide);
+  }
+
+  // ── Viewing and restoring an earlier version (#32) ───────────────────
+  // The owner map's view stays alive but hidden, so Undo and the saver keep
+  // their state; the version renders read-only in a host beside it.
+
+  function closeVersion() {
+    if (!versionView) return;
+    versionView.destroy();
+    versionView = null;
+    if (versionHost && versionHost.parentNode) versionHost.parentNode.removeChild(versionHost);
+    versionHost = null;
+    if (versionMode && versionMode.ownerEl) versionMode.ownerEl.hidden = false;
+    versionMode = null;
+  }
+
+  function showVersion(version, label) {
+    var ownerEl = app.firstElementChild;
+    if (!ownerEl || !current || !saverRef) return;
+    closeVersion();
+    ownerEl.hidden = true;
+    versionMode = { map: current.map, label: label, versionId: version.id, ownerEl: ownerEl };
+    var merged = M.compareVersion(version.doc, current.map.doc);
+    versionHost = document.createElement('div');
+    app.appendChild(versionHost);
+    versionView = root.M2Canvas.CanvasView(versionHost, {
+      doc: merged.doc,
+      demo: isDemo,
+      mapId: null, // a version keeps no viewport of its own
+      readOnly: true,
+      initialStatus: 'none',
+      version: {
+        label: label,
+        ideaCount: version.ideaCount,
+        ghostIds: merged.ghostIds,
+        onRestore: tryRestore,
+        onBack: closeVersion,
+      },
+    });
+  }
+
+  function tryRestore() {
+    var s = saverRef;
+    if (!versionMode || !s || s.inConflict()) return;
+    if (s.hasUnsaved()) {
+      toast('Still saving your latest changes. Try again in a moment.');
+      return;
+    }
+    var label = versionMode.label;
+    var un = root.unNative;
+    function go() {
+      if (!versionMode) return;
+      api('POST', '/api/maps/' + encodeURIComponent(versionMode.map.id) +
+        '/versions/' + encodeURIComponent(versionMode.versionId) + '/restore',
+        { baseRevision: s.revision() }).then(function (r) {
+          if (!versionMode) return;
+          closeVersion();
+          s.rebase(r.map.revision);
+          if (view) view.replaceDoc(r.map.doc, 'restore version');
+          toast('Restored the version from ' + label);
+        }).catch(function (err) {
+          if (!versionMode) return;
+          if (err.status === 409) {
+            closeVersion();
+            toast('This map changed on another device, so nothing was restored.');
+            s.drop();
+            showMap({ id: versionMode.map.id, doc: err.body.doc, revision: err.body.revision },
+              'owner', current ? current.withoutMaps : false);
+          } else if (err.status === 404) {
+            closeVersion();
+            toast('That version isn’t available any more.');
+          } else {
+            toast('Couldn’t restore this version');
+          }
+        });
+    }
+    if (un && un.alert) {
+      un.alert({
+        title: 'Restore this version?',
+        message: 'The map goes back to how it was on ' + label +
+          '. Your map as it is now is kept in Version history, and Undo brings it back.',
+        buttons: [
+          { label: 'Cancel', style: 'cancel' },
+          { label: 'Restore', style: 'destructive', handler: go },
+        ],
+      });
+    } else if (window.confirm('Restore the version from ' + label + '?')) {
+      go();
+    }
   }
 
   function onPageHide() {

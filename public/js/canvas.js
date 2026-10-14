@@ -33,6 +33,8 @@
     chevronUp: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>',
     chevronDown: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>',
     close: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>',
+    more: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>',
+    history: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 5.5v4h4"/><path d="M4 9.5a8 8 0 1 1-.3 4"/><path d="M12 8v4.5l3 1.8"/></svg>',
   };
 
   // The keyboard shortcuts (#15), one table the sheet is drawn from, so the
@@ -296,6 +298,23 @@
     kbdBtn.appendChild(icon('keyboard'));
     kbdBtn.addEventListener('click', function () { openShortcuts(); });
     topRight.appendChild(kbdBtn);
+
+    // Version history (#32): one tap under More, so the top bar stays
+    // quiet and later entries have somewhere to go.
+    if (opts.onVersionHistory) {
+      var moreBtn = el('button', 'btn-secondary btn-icon more-btn');
+      moreBtn.type = 'button';
+      moreBtn.setAttribute('aria-label', 'More');
+      moreBtn.title = 'More';
+      moreBtn.appendChild(icon('more'));
+      moreBtn.addEventListener('click', function () {
+        un.popover({
+          anchorEl: moreBtn,
+          items: [{ label: 'Version history', handler: opts.onVersionHistory }],
+        });
+      });
+      topRight.appendChild(moreBtn);
+    }
     topbar.appendChild(topRight);
     rootEl.appendChild(topbar);
 
@@ -378,7 +397,36 @@
     // Bottom bar: the selection line, then Add idea, or only Cancel while a
     // link waits for its second idea. A read-only view has none of it.
     var bar = null, selLine, addBtn, cancelBtn;
-    if (!readOnly) {
+    var ghosts = null; // ids of ideas added since the version being shown
+    if (opts.version) {
+      // Version mode (#32): an owned map read-only at an earlier version,
+      // with its own bar saying what is on the paper.
+      if (opts.version.ghostIds) {
+        ghosts = {};
+        opts.version.ghostIds.forEach(function (id) { ghosts[id] = true; });
+      }
+      bar = el('div', 'bottom-bar version-bar');
+      selLine = el('div', 'selection');
+      selLine.appendChild(el('span', 'sel-name',
+        'Viewing the version from ' + opts.version.label));
+      selLine.appendChild(el('span', 'sel-meta',
+        opts.version.ideaCount + ' ideas' +
+        (opts.version.ghostIds && opts.version.ghostIds.length
+          ? '. Faded ideas were added since.' : '')));
+      bar.appendChild(selLine);
+      var vActions = el('div', 'actions');
+      var restoreBtn = el('button', 'btn-primary', 'Restore this version');
+      restoreBtn.type = 'button';
+      restoreBtn.addEventListener('click', function () { opts.version.onRestore(); });
+      var backBtn = el('button', 'btn-secondary btn-wide', 'Back to current');
+      backBtn.type = 'button';
+      backBtn.addEventListener('click', function () { opts.version.onBack(); });
+      vActions.appendChild(restoreBtn);
+      vActions.appendChild(backBtn);
+      bar.appendChild(vActions);
+      rootEl.appendChild(bar);
+      announce('Viewing the version from ' + opts.version.label);
+    } else if (!readOnly) {
       bar = el('div', 'bottom-bar');
       selLine = el('div', 'selection');
       bar.appendChild(selLine);
@@ -864,6 +912,16 @@
       renderHistory();
     }
 
+    // A whole new doc in one step, the way a restore arrives (#32): one
+    // undo entry covers it, and a selection the new doc lacks is cleared.
+    function replaceDoc(next, label) {
+      record(label);
+      M.replaceWith(d, M.snapshot(next));
+      if (selectedId && !M.node(d, selectedId)) selectedId = null;
+      render();
+      commit();
+    }
+
     function renderHistory() {
       if (!undoBtn) return;
       var u = undoStack[undoStack.length - 1];
@@ -895,6 +953,12 @@
       return names[0] + ' and ' + (names.length - 1) + ' more';
     }
     function ideaLabel(n) {
+      var line = baseLabel(n);
+      if (ghosts && ghosts[n.id]) line += ', added since this version';
+      return line;
+    }
+
+    function baseLabel(n) {
       var held = peerHeld(n.id);
       var said = held ? ', selected by ' + held : '';
       if (n.id === 'root') {
@@ -955,6 +1019,7 @@
         if (n.id !== 'root') b.setAttribute('aria-haspopup', 'menu');
         if (M.depth(d, n.id) >= 3) b.classList.add('lvl-deep');
         if (focusId && !underFocus(n.id)) b.classList.add('is-dim');
+        if (ghosts && ghosts[n.id]) b.classList.add('is-ghost');
         b.setAttribute('aria-label', ideaLabel(n));
         b.style.left = n.x + 'px';
         b.style.top = n.y + 'px';
@@ -1106,6 +1171,7 @@
         var np = posOf(n);
         var mx = (s[0] + np[0]) / 2;
         if (focusId && !underFocus(n.id)) cls += ' dim';
+        if (ghosts && ghosts[n.id]) cls += ' ghost';
         paths += '<path class="' + cls + '" d="M' + s[0] + ' ' + s[1] +
           'C' + mx + ' ' + s[1] + ', ' + mx + ' ' + np[1] + ', ' + np[0] + ' ' + np[1] + '"/>';
       });
@@ -1759,7 +1825,7 @@
     }
 
     function renderBar() {
-      if (!bar) return;
+      if (!bar || readOnly) return;
       selLine.textContent = '';
       var n = selNode();
       var full = M.ideaCount(d) >= M.MAX_NODES;
@@ -2432,7 +2498,7 @@
     function setHint(text) {
       if (text === dragHint) return;
       dragHint = text;
-      if (!bar) return;
+      if (!bar || readOnly) return;
       if (text == null) { renderBar(); return; }
       selLine.textContent = '';
       selLine.appendChild(el('span', 'sel-meta', text));
@@ -2624,7 +2690,7 @@
       setTimeout(function () { close.focus(); }, 60);
     }
 
-    if (bar) {
+    if (addBtn) {
       cancelBtn.addEventListener('click', cancelLink);
       addBtn.addEventListener('click', openAdd);
     }
@@ -3049,6 +3115,7 @@
     // Undo and redo also work when nothing on the canvas has focus (after a
     // click on a top-bar button, say). Fields keep their own text undo.
     function onHistoryKey(e) {
+      if (rootEl.closest('[hidden]')) return; // the view is hidden behind another
       if (e.altKey) return;
       var t = e.target;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
@@ -3071,6 +3138,7 @@
       setPresence: setPresence,
       setLive: setLive,
       fit: function () { fit(true); },
+      replaceDoc: replaceDoc,
       destroy: function () {
         // A pending save flushes on teardown, unless a focused view is what
         // is on screen: that one is never kept.
