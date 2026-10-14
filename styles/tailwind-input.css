@@ -658,6 +658,18 @@
   .actions .btn-wide {
     flex: 1;
   }
+  /* The version bar (#32): its name and meta stack, since the sentence is
+     long, and on a narrow phone the two buttons do too. */
+  .version-bar .selection {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+  @media (max-width: 480px) {
+    .version-bar .actions {
+      flex-direction: column;
+    }
+  }
   /* The idea menu (#9): a small white bar floating just above the selected
      idea, with Edit, Add child, Join and Delete. It sits over the paper,
      not in the zoomed world, so it keeps its size; canvas.js moves it with
@@ -945,6 +957,15 @@
   .link-label.is-dim {
     opacity: 0.15;
     pointer-events: none;
+  }
+  /* Ideas added since the version being viewed (#32): faintly there, and
+     the version's own Undo and keys never reach them. */
+  .idea.is-ghost {
+    opacity: 0.35;
+    pointer-events: none;
+  }
+  .branches path.ghost {
+    opacity: 0.35;
   }
   /* Far out, the small words go: deep ideas keep only their underline, and
      a link's name waits until you zoom back in. */
