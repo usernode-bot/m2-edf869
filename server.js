@@ -1,7 +1,8 @@
 const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
-const { Pool } = require('pg');
+const pg = require('pg');
+const { Pool } = pg;
 const jwt = require('jsonwebtoken');
 
 // The page and the server validate maps with the same code: map-model.js is
@@ -268,6 +269,191 @@ const MAP_COLUMNS = 'id, title, doc, idea_count, created_at, updated_at, revisio
 // The made-up person who owns the staging demo's shared maps.
 const DEMO_FRIEND = 'staging-demo-friend';
 
+// The map row when this caller may open it: its owner, a signed-in viewer
+// (Public, or one of the people the owner added), or anyone holding the
+// map's current secret link (guests included, through `share`). Null
+// answers the same 404 as a missing map, whatever the reason.
+async function readAccess(req, mapId, share) {
+  if (!mapId || mapId.length > 64) return null;
+  if (req.user) {
+    const row = await pool.query(
+      `SELECT ${MAP_COLUMNS}, owner_id FROM maps m
+       WHERE m.id = $1 AND m.deleted_at IS NULL AND (m.owner_id = $2 OR m.visibility = 'public'
+         OR EXISTS (SELECT 1 FROM map_readers r WHERE r.map_id = m.id AND r.user_id = $2))`,
+      [mapId, String(req.user.id)]
+    );
+    if (row.rowCount) return { row: row.rows[0] };
+  }
+  if (share && typeof share === 'string' && share.length <= 64) {
+    const row = await pool.query(
+      `SELECT ${MAP_COLUMNS}, owner_id FROM maps
+       WHERE id = $1 AND share_token = $2 AND visibility = 'link' AND deleted_at IS NULL`,
+      [mapId, share]
+    );
+    if (row.rowCount) return { row: row.rows[0] };
+  }
+  return null;
+}
+
+// ── Live updates (#34) ───────────────────────────────────────────────────
+// Everyone with a map open holds one SSE stream (GET /api/maps/:id/events).
+// A save or a delete is announced ONCE through Postgres LISTEN/NOTIFY —
+// always used, whatever the replica count — and each replica forwards the
+// event to its own streams. Presence (who is on the map and which idea they
+// hold) lives in memory per replica, refreshed by the clients themselves,
+// so it needs no database and dies with the replica that holds it.
+
+const LIVE_CHANNEL = 'm2_events';
+const streams = new Map(); // map id -> Set of stream records
+const MAX_STREAMS = 8;     // per user per replica; the ninth ends the oldest
+
+function sseSend(res, event, data) {
+  if (res.writableEnded || res.destroyed) return;
+  try { res.write('event: ' + event + '\ndata: ' + JSON.stringify(data) + '\n\n'); }
+  catch {}
+}
+
+function addStream(mapId, rec) {
+  let set = streams.get(mapId);
+  if (!set) { set = new Set(); streams.set(mapId, set); }
+  // A stray client must not hold sockets forever.
+  const mine = [...set].filter(s => s.userId === rec.userId);
+  if (mine.length >= MAX_STREAMS) {
+    const oldest = mine[0];
+    set.delete(oldest);
+    try { oldest.res.end(); } catch {}
+  }
+  set.add(rec);
+}
+
+function removeStream(mapId, rec) {
+  const set = streams.get(mapId);
+  if (!set) return;
+  set.delete(rec);
+  if (set.size === 0) streams.delete(mapId);
+}
+
+function endAllStreams() {
+  for (const set of streams.values()) {
+    for (const s of set) {
+      sseSend(s.res, 'bye', {});
+      try { s.res.end(); } catch {}
+    }
+  }
+  streams.clear();
+}
+
+// ── Presence: in memory, swept with real time ────────────────────────────
+const PRESENCE_TTL_MS = 40_000;
+const presence = new Map(); // map id -> Map(userId -> { id, username, selectedId, at })
+const PRESENCE_COLOURS = ['teal', 'amber', 'violet', 'rose', 'sky', 'green', 'orange', 'indigo', 'pink', 'slate'];
+// From the user id, so every device gives the same person the same colour.
+function presenceColour(userId) {
+  const byte = crypto.createHash('sha1').update(String(userId)).digest()[0];
+  return PRESENCE_COLOURS[byte % PRESENCE_COLOURS.length];
+}
+// The staging demo's host keeps an idea selected on their own maps, so the
+// shared-link screens are never empty of people.
+const demoSelection = new Map(); // map id -> idea id
+
+function sendPresence(mapId) {
+  const set = streams.get(mapId);
+  if (!set || set.size === 0) return;
+  const cutoff = Date.now() - PRESENCE_TTL_MS;
+  const byUser = presence.get(mapId);
+  const people = [];
+  if (byUser) {
+    for (const p of byUser.values()) {
+      if (p.at < cutoff) continue;
+      people.push({ id: p.id, username: p.username, selectedId: p.selectedId, color: presenceColour(p.id) });
+    }
+  }
+  if (IS_STAGING && demoSelection.has(mapId)) {
+    people.push({
+      id: DEMO_FRIEND, username: 'Staging demo friend',
+      selectedId: demoSelection.get(mapId), color: presenceColour(DEMO_FRIEND),
+    });
+  }
+  for (const s of set) sseSend(s.res, 'presence', { people });
+}
+
+const presenceSweep = setInterval(() => {
+  const cutoff = Date.now() - PRESENCE_TTL_MS;
+  for (const [mapId, byUser] of presence) {
+    let changed = false;
+    for (const [id, p] of byUser) {
+      if (p.at < cutoff) { byUser.delete(id); changed = true; }
+    }
+    if (byUser.size === 0) presence.delete(mapId);
+    else if (changed) sendPresence(mapId);
+  }
+}, 5000).unref();
+
+// ── The one announcement channel ─────────────────────────────────────────
+function notify(payload) {
+  pool.query('SELECT pg_notify($1, $2)', [LIVE_CHANNEL, JSON.stringify(payload)])
+    .catch(err => console.warn('pg_notify failed: ' + err.message));
+}
+
+let listenClient = null;
+let listenUp = false;      // has this replica ever completed a LISTEN?
+let listenTries = 0;
+const LISTEN_BACKOFF = [2000, 5000, 10000];
+
+function deliver(ev) {
+  if (!ev || typeof ev.mapId !== 'string') return;
+  const set = streams.get(ev.mapId);
+  if (!set || set.size === 0) return;
+  for (const s of set) {
+    // The saver learns its own save from the PUT's answer; everyone else
+    // (and every guest) is told here.
+    if (ev.kind === 'doc' && s.signedIn && ev.by === s.userId) continue;
+    if (ev.kind === 'doc') sseSend(s.res, 'doc', { revision: ev.revision, by: ev.by });
+    else sseSend(s.res, 'gone', {});
+  }
+}
+
+function deliverAll(kind) {
+  for (const set of streams.values()) {
+    for (const s of set) sseSend(s.res, kind, {});
+  }
+}
+
+// A dead pg client cannot reconnect, so each attempt makes a fresh one.
+function startListener() {
+  if (shuttingDown || listenClient) return;
+  const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  listenClient = client;
+  let dead = false;
+  const drop = () => {
+    if (dead) return;
+    dead = true;
+    listenUp = false;
+    if (listenClient === client) listenClient = null;
+    client.end().catch(() => {});
+    const wait = LISTEN_BACKOFF[Math.min(listenTries++, LISTEN_BACKOFF.length - 1)];
+    setTimeout(startListener, wait).unref();
+  };
+  client.on('notification', msg => {
+    let ev;
+    try { ev = JSON.parse(msg.payload); } catch { return; }
+    deliver(ev);
+  });
+  client.on('error', drop);
+  client.on('end', drop);
+  client.connect().then(async () => {
+    await client.query('LISTEN ' + LIVE_CHANNEL);
+    const first = !listenUp;
+    listenUp = true;
+    listenTries = 0;
+    // After a gap in the announcements, streams fetch the missing time.
+    if (!first) deliverAll('resync');
+  }).catch(err => {
+    console.warn('LISTEN setup failed: ' + err.message);
+    drop();
+  });
+}
+
 function mapSummary(row) {
   return {
     id: row.id,
@@ -497,15 +683,10 @@ app.get('/api/maps/:id', async (req, res) => {
   try {
     if (!req.user) return res.status(404).json({ error: 'Map not found' });
     const userId = String(req.user.id);
-    const row = await pool.query(
-      `SELECT ${MAP_COLUMNS}, owner_id FROM maps m
-       WHERE m.id = $1 AND m.deleted_at IS NULL AND (m.owner_id = $2 OR m.visibility = 'public'
-         OR EXISTS (SELECT 1 FROM map_readers r WHERE r.map_id = m.id AND r.user_id = $2))`,
-      [req.params.id, userId]
-    );
-    if (!row.rowCount) return res.status(404).json({ error: 'Map not found' });
-    const access = row.rows[0].owner_id === userId ? 'owner' : 'viewer';
-    return res.json({ map: mapFull(row.rows[0]), access });
+    const access = await readAccess(req, req.params.id, null);
+    if (!access) return res.status(404).json({ error: 'Map not found' });
+    const level = access.row.owner_id === userId ? 'owner' : 'viewer';
+    return res.json({ map: mapFull(access.row), access: level });
   } catch (err) {
     console.error('GET /api/maps/:id failed: ' + err.message);
     return res.status(500).json({ error: 'Could not open the map' });
@@ -577,6 +758,9 @@ app.put('/api/maps/:id', async (req, res) => {
     );
     if (reason) await pruneVersions(client, req.params.id);
     await client.query('COMMIT');
+    // One announcement per save; each open stream hears it (the saver's own
+    // stream skips it — the answer below already carries the revision).
+    notify({ kind: 'doc', mapId: req.params.id, revision: updated.rows[0].revision, by: ownerId });
     return res.json({
       updatedAt: updated.rows[0].updated_at.toISOString(),
       revision: updated.rows[0].revision,
@@ -751,6 +935,7 @@ app.post('/api/maps/:id/versions/:vid/restore', async (req, res) => {
     );
     await pruneVersions(client, req.params.id);
     await client.query('COMMIT');
+    notify({ kind: 'doc', mapId: req.params.id, revision: updated.rows[0].revision, by: ownerId });
     return res.json({ map: mapFull(updated.rows[0]) });
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (e) { /* already gone */ }
@@ -772,6 +957,9 @@ app.delete('/api/maps/:id', async (req, res) => {
       [req.params.id, String(req.user.id), req.now]
     );
     if (!deleted.rowCount) return res.status(404).json({ error: 'Map not found' });
+    // Every open view of the map is told it is gone; they all answer like
+    // the 404 a further GET would now give.
+    notify({ kind: 'gone', mapId: req.params.id });
     return res.status(204).end();
   } catch (err) {
     console.error('DELETE /api/maps/:id failed: ' + err.message);
@@ -1093,6 +1281,100 @@ app.delete('/api/maps/:id/readers/:userId', async (req, res) => {
   }
 });
 
+// ── The live stream and presence routes ──────────────────────────────────
+// The stream is the GET; presence is refreshed by the client with POSTs.
+// EventSource cannot set headers, so the page passes its token as ?token=
+// (the auth middleware above reads it), and a secret link's share token as
+// ?share= so a guest can hold a stream on the map the link opened.
+
+app.get('/api/maps/:id/events', async (req, res) => {
+  try {
+    const share = typeof req.query.share === 'string' ? req.query.share : null;
+    const access = await readAccess(req, req.params.id, share);
+    if (!access) return res.status(404).json({ error: 'Map not found' });
+    const row = access.row;
+    const mapId = req.params.id;
+    const userId = req.user ? String(req.user.id) : null;
+    const rec = { res, userId, signedIn: !!userId, share };
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      'X-Accel-Buffering': 'no',
+    });
+    res.flushHeaders();
+    res.write('retry: 3000\n\n');
+    sseSend(res, 'hello', { revision: row.revision, you: userId });
+    addStream(mapId, rec);
+    if (IS_STAGING && row.owner_id === DEMO_FRIEND) {
+      const main = (row.doc.nodes || []).find(n => n.parent === 'root' && n.id !== 'root');
+      demoSelection.set(mapId, main ? main.id : null);
+    }
+    sendPresence(mapId);
+
+    // A comment line every 25 s keeps proxies from closing the stream, and
+    // is also the moment access is checked again: sharing switched away
+    // from the link, a reader was removed, the map deleted.
+    const beat = setInterval(() => {
+      try { res.write(': ping\n\n'); } catch {}
+      readAccess(req, mapId, rec.share).then(a => {
+        if (a || res.destroyed) return;
+        sseSend(res, 'bye', {});
+        removeStream(mapId, rec);
+        try { res.end(); } catch {}
+      }).catch(() => {});
+    }, 25_000);
+    beat.unref();
+
+    req.on('close', () => {
+      clearInterval(beat);
+      removeStream(mapId, rec);
+    });
+  } catch (err) {
+    console.error('GET /api/maps/:id/events failed: ' + err.message);
+    return res.status(500).json({ error: 'Could not open the live stream' });
+  }
+});
+
+app.post('/api/maps/:id/presence', async (req, res) => {
+  try {
+    const share = req.body && typeof req.body.share === 'string' ? req.body.share : null;
+    const access = await readAccess(req, req.params.id, share);
+    if (!access) return res.status(404).json({ error: 'Map not found' });
+    const userId = String(req.user.id);
+    const username = String(req.user.username || '').slice(0, 40);
+    let selectedId = req.body ? req.body.selectedId : null;
+    if (typeof selectedId !== 'string' || selectedId.length === 0 || selectedId.length > 40) {
+      selectedId = null;
+    }
+    let byUser = presence.get(req.params.id);
+    if (!byUser) { byUser = new Map(); presence.set(req.params.id, byUser); }
+    const prev = byUser.get(userId);
+    byUser.set(userId, { id: userId, username, selectedId, at: Date.now() });
+    // A pure refresh (the 15 s keep-alive) is not worth an announcement;
+    // arriving, or moving the selection, is.
+    if (!prev || prev.selectedId !== selectedId) sendPresence(req.params.id);
+    return res.status(204).end();
+  } catch (err) {
+    console.error('POST /api/maps/:id/presence failed: ' + err.message);
+    return res.status(500).json({ error: 'Could not update presence' });
+  }
+});
+
+app.post('/api/maps/:id/presence/leave', async (req, res) => {
+  try {
+    const share = req.body && typeof req.body.share === 'string' ? req.body.share : null;
+    const access = await readAccess(req, req.params.id, share);
+    if (!access) return res.status(204).end();
+    const byUser = presence.get(req.params.id);
+    if (byUser && byUser.delete(String(req.user.id))) sendPresence(req.params.id);
+    return res.status(204).end();
+  } catch (err) {
+    console.error('POST /api/maps/:id/presence/leave failed: ' + err.message);
+    return res.status(500).json({ error: 'Could not update presence' });
+  }
+});
+
 // Unknown API paths answer JSON, never the HTML shell.
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
 
@@ -1149,6 +1431,7 @@ async function start() {
   purgeTrash();
   setInterval(purgeTrash, 60 * 60 * 1000).unref();
   const server = app.listen(port, () => console.log(`Listening on :${port}`));
+  startListener();
   // Let Envoy retire idle upstream connections at 60s, with a 15s margin.
   server.keepAliveTimeout = 75_000;
 
@@ -1159,6 +1442,12 @@ async function start() {
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    // The streams end first — each is told the server is going away — so
+    // the drain below never waits on an open SSE response. The LISTEN
+    // connection and the presence sweep go with them.
+    endAllStreams();
+    if (listenClient) { const c = listenClient; listenClient = null; c.end().catch(() => {}); }
+    clearInterval(presenceSweep);
     server.close();
     if (server.closeIdleConnections) server.closeIdleConnections();
     setTimeout(() => {

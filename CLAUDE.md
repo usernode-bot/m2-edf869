@@ -248,3 +248,17 @@ Re-theme by changing the token values there, keeping every text pair at
   (`GET /api/trash`, `POST /api/maps/:id/restore`,
   `DELETE /api/maps/:id/permanent`); the purge runs at boot and hourly and
   uses real time (SQL `now()`), never `req.now`.
+- Live co-editing (#34) is one stream per open map:
+  `GET /api/maps/:id/events` (SSE, token or share in the query) carries
+  `hello`/`doc`/`presence`/`gone`/`resync`/`bye`, always fanned out through
+  Postgres LISTEN/NOTIFY on channel `m2_events` — every route that changes
+  a map's doc or deletes one calls `notify()`. Presence (who is here, which
+  idea each holds) lives in memory with a 40 s TTL, refreshed by the
+  clients' POSTs to `/api/maps/:id/presence[/leave]`; it never touches the
+  database. A newer copy that arrives is merged, not reloaded: the merge
+  lives in `public/js/map-merge.js` (pure, validated by `map-model.js` —
+  `{ doc: null }` means show the conflict sheet), the saver's `baseDoc` is
+  the base, `applyRemote` is the only way a remote doc reaches the canvas,
+  and peer presence (rings, tags, the initials in the top bar) is view
+  state rendered by `setPresence` in `canvas.js` — never recorded, never
+  in the doc.
