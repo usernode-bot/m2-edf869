@@ -563,9 +563,15 @@
     min-width: 0;
   }
   /* Below 480 px the Maps and Share buttons keep their icons and their
-     aria-labels only, so Fit and the undo and redo buttons stay on screen. */
+     aria-labels only, so Fit and the undo and redo buttons stay on screen.
+     The top bar still has seven buttons there, so the staging pill gives
+     way entirely: it overlaps Undo if it stays. A reader's View only pill
+     stays — a read-only bar has room for it. */
   @media (max-width: 479px) {
     .topbar .btn-label {
+      display: none;
+    }
+    .topbar .demo-pill {
       display: none;
     }
   }
