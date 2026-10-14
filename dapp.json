@@ -124,6 +124,11 @@
       "path": "/?share=staging-demo-link",
       "expectSelector": ".topbar .presence .presence-dot",
       "expectText": "Staging demo friend"
+    },
+    {
+      "name": "app.service-worker",
+      "path": "/sw.js",
+      "expectText": "m2-shell"
     }
   ]
 }

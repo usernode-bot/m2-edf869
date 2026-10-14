@@ -19,6 +19,24 @@
   var shareParam = params.get('share');
   var mapParam = params.get('map');
 
+  // ── Offline (#40) ────────────────────────────────────────────────────
+  // The device keeps the app shell (a service worker: page, styles, the
+  // app's own scripts — never /api, never the platform's hosted files) and
+  // the last 20 maps this person opened (IndexedDB, via M2Offline). When
+  // the connection is away, maps open from the device's copy, edits wait
+  // there, and a sync pass sends them when it comes back. `ns` is whose
+  // maps they are (api.js remembers it, since an offline page carries no
+  // token) and Off is the store, absent when the browser refuses it.
+  var Off = root.M2Offline;
+  var ns = root.M2Api.ns;
+  var OFFLINE_MSG = 'You’re offline. This needs a connection.';
+
+  try {
+    if (root.navigator && 'serviceWorker' in root.navigator) {
+      root.navigator.serviceWorker.register('/sw.js').catch(function () {});
+    }
+  } catch (e) { /* no worker: the app works online-only, as before */ }
+
   function destroyView() {
     if (liveRef) { liveRef.close(); liveRef = null; }
     closeVersion();
@@ -51,11 +69,41 @@
       base: typeof opts.revision === 'number' ? opts.revision : 0,
       // The copy the base revision holds (#34): the middle of the three-way
       // merge when a change made elsewhere arrives while edits sit here.
-      baseDoc: opts.doc ? JSON.parse(JSON.stringify(opts.doc)) : null,
+      // An offline open names it explicitly (#40): the doc on screen may
+      // already hold edits the server has not seen.
+      baseDoc: opts.baseDoc
+        ? JSON.parse(JSON.stringify(opts.baseDoc))
+        : (opts.doc ? JSON.parse(JSON.stringify(opts.doc)) : null),
+      // Set while this screen holds edits the server has not seen (#40),
+      // so a later 409 is answered with the merge, not the conflict sheet.
+      offlineEdits: !!(opts.local && opts.local.pending),
       conflict: false, server: null,
     };
     var BACKOFF = [2000, 5000, 10000];
     var setStatus = opts.setStatus;
+
+    // The device's copy of this map (#40), rewritten on every change and
+    // on every answered save, so what waits offline is always the whole
+    // screen. Nothing here blocks the send.
+    var local = !!opts.local && Off && Off.available();
+    function putLocal(doc, pending) {
+      if (!local) return Promise.resolve(null);
+      var rec = Object.assign({}, opts.local || {}, {
+        id: opts.mapId,
+        doc: JSON.parse(JSON.stringify(doc)),
+        revision: typeof state.base === 'number' ? state.base : 0,
+        baseDoc: state.baseDoc ? JSON.parse(JSON.stringify(state.baseDoc)) : null,
+        access: opts.access || 'owner',
+        pending: pending !== false,
+        temp: opts.temp === true,
+        title: doc.nodes && doc.nodes[0] ? doc.nodes[0].text.trim() : '',
+        ideaCount: doc.nodes ? doc.nodes.length : 0,
+        updatedAt: new Date().toISOString(),
+        openedAt: (opts.local && opts.local.openedAt) || Date.now(),
+      });
+      if (opts.shareToken) rec.shareToken = opts.shareToken;
+      return Off.putMap(ns, rec);
+    }
 
     function schedule(ms) {
       clearTimeout(state.timer);
@@ -84,6 +132,15 @@
       if (!state.dirty || state.inFlight || state.dead || state.conflict) return;
       var why = M.validate(state.doc);
       if (why) { setStatus('error'); return; }
+      if (opts.temp) {
+        // A map the device made up offline (#40): there is nothing to PUT
+        // until the server knows it. The sync pass creates it with a POST
+        // and retargets this screen; until then the paper reads Saving (a
+        // connection) or Saved on this device (none).
+        if (root.navigator.onLine) { setStatus('saving'); syncAll(); }
+        else { setStatus('local'); if (opts.setOffline) opts.setOffline(true); }
+        return;
+      }
       state.inFlight = true;
       state.dirty = false; // the snapshot below is the whole send
       var snapshot = JSON.parse(JSON.stringify(state.doc));
@@ -91,9 +148,15 @@
         state.inFlight = false;
         state.failures = 0;
         saved(r, snapshot);
+        if (local) putLocal(snapshot, false);
+        var wasOffline = state.offlineEdits;
+        state.offlineEdits = false;
         if (state.dead) return;
         if (state.dirty) schedule(0);
-        else setStatus('saved');
+        else {
+          setStatus('saved');
+          if (wasOffline && opts.setOffline) opts.setOffline(false);
+        }
       }).catch(function (err) {
         state.inFlight = false;
         if (state.dead) return;
@@ -106,9 +169,36 @@
           if (opts.onGone) opts.onGone();
           return;
         }
-        if (err.status === 409) { enterConflict(err.body); return; }
+        if (err.status === 409) {
+          // The map moved on while these edits waited — often because they
+          // were made offline (#40). The three-way merge decides: merged
+          // edits go on the server's revision; a tangle it cannot untie
+          // asks which copy to keep, as any other conflict does.
+          if (state.offlineEdits && root.M2Merge && err.body && err.body.doc) {
+            var m = root.M2Merge.merge(state.baseDoc, state.doc, err.body.doc);
+            if (m && m.doc) {
+              state.offlineEdits = false;
+              if (opts.onMerged) opts.onMerged(m.doc, err.body.revision);
+              return;
+            }
+          }
+          enterConflict(err.body);
+          return;
+        }
         state.failures++;
-        setStatus('error');
+        if (err.offline) {
+          // The connection is away: the edit already went onto the
+          // device, so the paper says so instead of Not saved, and the
+          // save tries again on the same clock as any other failure.
+          state.offlineEdits = true;
+          putLocal(state.doc, true).then(function (ok) {
+            if (state.dead) return;
+            setStatus(ok ? 'local' : 'error');
+            if (ok && opts.setOffline) opts.setOffline(true);
+          });
+        } else {
+          setStatus('error');
+        }
         var wait = state.failures <= BACKOFF.length ? BACKOFF[state.failures - 1] : 10000;
         schedule(wait);
       });
@@ -118,6 +208,7 @@
       changed: function (doc) {
         state.doc = doc;
         state.dirty = true;
+        putLocal(doc, true); // the device's copy first, so nothing is lost (#40)
         if (state.dead) return;
         if (state.conflict) {
           // Still undecided: keep the edit, and ask again.
@@ -134,6 +225,7 @@
         // later save starts from the right revision, and a refusal is
         // reported rather than lost.
         if (!state.dirty || !state.doc || state.dead || state.conflict) return;
+        if (opts.temp) return; // nothing to send until the server knows it (#40)
         var token = new URLSearchParams(window.location.search).get('token');
         var headers = { 'Content-Type': 'application/json' };
         if (token) headers['x-usernode-token'] = token;
@@ -172,6 +264,7 @@
           state.inFlight = false;
           if (state.dead) return;
           state.dirty = true;
+          putLocal(state.doc, true); // the device keeps it while offline (#40)
           schedule(BACKOFF[0]);
         });
       },
@@ -197,6 +290,23 @@
       // A newer copy was found without a refused save (coming back to the
       // tab with unsaved edits): same state as a 409.
       showConflict: function (server) { enterConflict(server); },
+      // Offline, with edits waiting: the paper says the device has them
+      // (the sync pass asks this when its own send finds no connection).
+      markLocal: function () {
+        setStatus('local');
+        if (opts.setOffline) opts.setOffline(true);
+      },
+      // A map created offline got its real id from the server (#40): the
+      // screen keeps working under the new id, on the new revision.
+      retarget: function (newId, revision, doc) {
+        opts.mapId = newId;
+        opts.temp = false;
+        if (typeof revision === 'number') state.base = revision;
+        state.baseDoc = JSON.parse(JSON.stringify(doc));
+        if (opts.local) { opts.local.id = newId; opts.local.temp = false; }
+        if (state.dirty) schedule(0); // edits made since the send go next
+        else setStatus('saved');
+      },
       // Keep mine: save this screen's doc over the server's revision.
       keepMine: function (revision) {
         state.base = revision;
@@ -215,6 +325,143 @@
         state.conflict = false;
       },
     };
+  }
+
+  // ── Offline sync (#40) ───────────────────────────────────────────────
+  // One pass sends every edit the device kept while offline: an edit waits
+  // on its record (pending), a map the device made up goes up whole with a
+  // POST. The pass runs after the first successful API call of a session
+  // and after every later one (kick), whenever the connection comes back,
+  // and whenever a temp map's save fires while online. One pass at a time;
+  // a network failure ends it, and the next kick or 'online' tries again.
+  var syncing = false;
+
+  function syncAll() {
+    if (syncing || !ns || !Off || !Off.available()) return;
+    syncing = true;
+    Off.pending(ns).then(function (list) {
+      var i = 0;
+      function step() {
+        if (i >= list.length) return Promise.resolve();
+        return syncOne(list[i++]).then(function (go) {
+          return go === false ? null : step();
+        });
+      }
+      return step();
+    }).catch(function () { /* the pass stops; the next trigger tries again */ })
+      .then(function () { syncing = false; });
+  }
+
+  function syncOne(rec) {
+    // The screen's own saver is already sending (or deciding) this map —
+    // except a temp one, whose only way up is this pass.
+    if (openRef && openRef.id === rec.id && saverRef && !rec.temp) return null;
+    var title = rec.title || (rec.doc && rec.doc.nodes && rec.doc.nodes[0]
+      ? rec.doc.nodes[0].text.trim() : '') || 'A map';
+    var call = rec.temp
+      ? api('POST', '/api/maps', { doc: rec.doc })
+      : api('PUT', '/api/maps/' + encodeURIComponent(rec.id),
+          { doc: rec.doc, baseRevision: typeof rec.revision === 'number' ? rec.revision : 0 });
+    return call.then(function (r) {
+      return keepSynced(rec, rec.temp ? r.map.id : rec.id,
+        rec.temp ? r.map.revision : r.revision, rec.doc, rec.temp ? rec.doc : rec.baseDoc);
+    }).catch(function (err) {
+      if (err.offline) {
+        // The connection dropped mid-pass: stop here, try on the next kick.
+        if (openRef && openRef.id === rec.id && saverRef && saverRef.markLocal) saverRef.markLocal();
+        return false;
+      }
+      if (err.status === 404) {
+        // Deleted or unshared while its edits waited: the device's copy
+        // goes too, and a toast says why it left.
+        return Off.removeMap(ns, rec.id).then(function () {
+          toast(title + ' was removed from this device. It was deleted or isn’t shared with you any more.');
+        });
+      }
+      if (err.status === 409 && err.body && err.body.doc && root.M2Merge) {
+        // The map moved on meanwhile: the same three-way merge the screen
+        // uses decides whether these edits can still land.
+        var m = root.M2Merge.merge(rec.baseDoc || rec.doc, rec.doc, err.body.doc);
+        if (m && m.doc) {
+          var call2 = rec.temp
+            ? api('POST', '/api/maps', { doc: m.doc })
+            : api('PUT', '/api/maps/' + encodeURIComponent(rec.id),
+                { doc: m.doc, baseRevision: err.body.revision });
+          return call2.then(function (r2) {
+            return keepSynced(rec, rec.temp ? r2.map.id : rec.id,
+              rec.temp ? r2.map.revision : r2.revision, m.doc, m.doc);
+          }).catch(function (err2) {
+            if (err2.offline) return false;
+            return giveUpSync(rec);
+          });
+        }
+      }
+      // Unmergeable, or refused for another reason: stop waiting to send
+      // this one. The next open fetches the server's copy, and the
+      // conflict sheet decides which way the map goes.
+      return giveUpSync(rec);
+    });
+  }
+
+  // The record after a sent save: no longer waiting, on the revision the
+  // server answered. A temp one leaves its device id behind for the real
+  // one, and a screen working under the temp id follows.
+  function keepSynced(rec, id, revision, doc, baseDoc) {
+    var keep = {
+      id: id,
+      doc: doc,
+      revision: typeof revision === 'number' ? revision : 0,
+      baseDoc: baseDoc || doc,
+      access: rec.access,
+      shareToken: rec.shareToken,
+      title: rec.title,
+      ideaCount: rec.ideaCount,
+      outline: rec.outline,
+      openedAt: rec.openedAt,
+      updatedAt: new Date().toISOString(),
+      pending: false,
+      temp: false,
+    };
+    var done = Off.putMap(ns, keep);
+    if (rec.temp) done = done.then(function () { return Off.removeMap(ns, rec.id); });
+    return done.then(function () { retargetTemp(rec, keep); });
+  }
+
+  function retargetTemp(rec, keep) {
+    if (!Off.isTempId(rec.id)) return;
+    if (!openRef || openRef.id !== rec.id || !saverRef || !saverRef.retarget) return;
+    openRef.id = keep.id;
+    openRef.fetchPath = '/api/maps/' + encodeURIComponent(keep.id);
+    if (current && current.map) current.map.id = keep.id;
+    saverRef.retarget(keep.id, keep.revision, keep.doc);
+    try { history.replaceState(null, '', '#/map/' + encodeURIComponent(keep.id)); } catch (e) { /* keep the old hash */ }
+  }
+
+  function giveUpSync(rec) {
+    return Off.getMap(ns, rec.id).then(function (cur) {
+      if (!cur) return null;
+      return Off.putMap(ns, Object.assign({}, cur, { pending: false }));
+    });
+  }
+
+  // The device's record for a map being opened (#40), so an offline open
+  // has it later. The store keeps the last 20 opened and evicts the rest.
+  function rememberLocal(map, mode) {
+    if (!Off || !ns || !Off.available() || mode === 'guest') return;
+    var rec = {
+      id: map.id,
+      doc: map.doc,
+      revision: typeof map.revision === 'number' ? map.revision : 0,
+      baseDoc: map.doc,
+      access: mode,
+      openedAt: Date.now(),
+      updatedAt: map.updatedAt || null,
+      pending: false,
+      title: map.doc.nodes && map.doc.nodes[0] ? map.doc.nodes[0].text.trim() : '',
+      ideaCount: map.doc.nodes ? map.doc.nodes.length : 0,
+    };
+    if (shareParam && mode === 'viewer') rec.shareToken = shareParam;
+    Off.putMap(ns, rec);
   }
 
   // ── One map ──────────────────────────────────────────────────────────
@@ -237,14 +484,27 @@
   // only; 'guest' plays with the example map in memory. A guest reading a
   // shared map is a viewer withoutMaps: no Maps button, since Your maps has
   // nothing of theirs.
-  function showMap(map, mode, withoutMaps) {
+  function showMap(map, mode, withoutMaps, localRec, offlineNow) {
     var owner = mode === 'owner';
     var editor = mode === 'editor';
     var guest = mode === 'guest';
+    // A temp map (#40) exists only on this device until the sync pass
+    // creates it; it has no live stream and nothing to share yet.
+    var isTemp = !!(Off && Off.isTempId(map.id));
     var v = null;
     var saver = (owner || editor) ? makeSaver({
       mapId: map.id,
       revision: map.revision,
+      baseDoc: map.baseDoc || null,
+      temp: isTemp,
+      access: mode,
+      local: localRec || (guest ? null : {
+        id: map.id,
+        revision: map.revision,
+        baseDoc: map.doc,
+        access: mode,
+        openedAt: Date.now(),
+      }),
       // An editor whose map disappears (the owner trashed it, or took their
       // access away) reopens it: they land back where their access now
       // allows. An owner's own deleted map is today's quiet drop.
@@ -253,7 +513,16 @@
       } : null,
       doc: map.doc,
       setStatus: function (kind) { if (v) v.setStatus(kind); },
+      setOffline: function (on) { if (v) v.setOffline(on); },
       onConflict: function (server) { onConflict(saver, map, withoutMaps, server, mode); },
+      onMerged: function (mergedDoc, revision) {
+        // Edits that waited offline fit the server's newer copy (#40): the
+        // screen takes the merged doc, and whatever the server has not
+        // saved yet saves on the new revision — as a live merge does.
+        if (view && view.applyRemote) view.applyRemote(mergedDoc);
+        saver.adopt(revision, mergedDoc);
+        saver.changed(map.doc);
+      },
     }) : null;
     saverRef = saver;
     current = (owner || editor)
@@ -286,15 +555,30 @@
       editedBy: map.editedBy && map.updatedAt
         ? { name: map.editedBy, at: map.updatedAt } : null,
       onOpenMaps: withoutMaps ? null : function () { location.hash = '#/maps'; },
-      onShare: owner ? function () { root.M2ShareSheet(map.id, map.doc.nodes[0].text.trim()); } : null,
+      onShare: owner ? function () {
+        if (!root.navigator.onLine) { toast(OFFLINE_MSG); return; }
+        if (isTemp) { toast('This map isn’t saved online yet. Try again in a moment.'); return; }
+        root.M2ShareSheet(map.id, map.doc.nodes[0].text.trim());
+      } : null,
       onSelect: guest ? null : function (id) { if (liveRef) liveRef.setSelection(id); },
       onVersionHistory: owner ? function () {
+        if (!root.navigator.onLine) { toast(OFFLINE_MSG); return; }
+        if (isTemp) { toast('This map isn’t saved online yet. Try again in a moment.'); return; }
         root.M2VersionSheet(map.id, { onOpen: showVersion });
       } : null,
       onDeleteMap: owner ? function () {
+        if (!root.navigator.onLine) { toast(OFFLINE_MSG); return; }
+        if (isTemp) {
+          // The server never knew this map: deleting it is local only.
+          if (saver) saver.drop();
+          if (Off && ns) Off.removeMap(ns, map.id);
+          location.hash = '#/maps';
+          return;
+        }
         // Anything still unsaved goes first, so the trashed copy has it.
         if (saver) saver.flushNow();
         api('DELETE', '/api/maps/' + map.id).then(function () {
+          if (Off && ns) Off.removeMap(ns, map.id);
           location.hash = '#/maps';
           toast('Moved to Recently deleted', {
             action: {
@@ -308,7 +592,8 @@
               },
             },
           });
-        }).catch(function () {
+        }).catch(function (err) {
+          if (err.offline) { toast(OFFLINE_MSG); if (v) v.setOffline(true); return; }
           if (v) v.setStatus('error');
         });
       } : null,
@@ -318,9 +603,19 @@
     });
     view = v;
     if (guest) v.setStatus('guest');
+    // The paper knows when the connection is away (#40): the pill shows,
+    // and the status says where the edits sit.
+    if (offlineNow && !guest) v.setOffline(true);
+    // The device keeps the maps this person opens (#40), so one is there
+    // when the connection is not. A record passed in (a pending one) is
+    // already right; the guest's example is never kept.
+    if (!localRec && !guest && !isTemp && Off && ns && Off.available()) {
+      rememberLocal(map, mode);
+    }
     // The live stream: everyone on a real map, owner or viewer. The guest's
-    // example exists only in memory here, so there is nothing to join.
-    if (!guest) {
+    // example exists only in memory here, so there is nothing to join, and
+    // a temp map is not on the server yet.
+    if (!guest && !isTemp) {
       liveRef = root.M2Live.connect({
         mapId: map.id,
         onState: function (state) { if (view === v) v.setLive(state); },
@@ -501,6 +796,7 @@
       return;
     }
     if (kind === 'gone') {
+      if (Off && ns) Off.removeMap(ns, c.id); // the device's copy goes with it (#40)
       destroyView();
       mapError({ status: 404 });
       return;
@@ -595,12 +891,73 @@
     view = { destroy: function () { app.textContent = ''; } };
   }
 
+  // ── Opening a map, with the device's copy as the fallback (#40) ──────
   function openMapById(id) {
+    // A map the device made up offline still has its device id: its local
+    // record is the whole map, and the sync pass gives it a real one.
+    if (Off && Off.isTempId(id)) { openLocalRecord(id); return; }
     render(root.M2Canvas.loadingEl());
     api('GET', '/api/maps/' + encodeURIComponent(id)).then(function (r) {
-      showMap(r.map, r.access === 'owner' || r.access === 'editor' ? r.access : 'viewer', false);
+      var mode = r.access === 'owner' || r.access === 'editor' ? r.access : 'viewer';
+      function openIt(doc, revision, baseDoc, local) {
+        showMap({
+          id: r.map.id,
+          doc: doc,
+          revision: revision,
+          baseDoc: baseDoc || null,
+          updatedAt: r.map.updatedAt,
+          editedBy: r.map.editedBy,
+        }, mode, false, local);
+      }
+      if (!Off || !ns || !Off.available()) { openIt(r.map.doc, r.map.revision, null, null); return; }
+      Off.getMap(ns, r.map.id).then(function (rec) {
+        if (rec && rec.pending && rec.doc) {
+          // This device holds edits the server has not seen: open on
+          // those, against the revision they were made from, so the save
+          // meets whatever moved on the server through the merge.
+          openIt(rec.doc, typeof rec.revision === 'number' ? rec.revision : 0,
+            rec.baseDoc || rec.doc, rec);
+        } else {
+          openIt(r.map.doc, r.map.revision, null, null);
+        }
+      });
     }).catch(function (err) {
+      if (err.offline) {
+        openLocalOr(id, err, function () { mapError(err, function () { openMapById(id); }); });
+        return;
+      }
+      // The map is gone for everyone; the device's copy of it goes too.
+      if (err.status === 404 && Off && ns) Off.removeMap(ns, id);
       mapError(err, function () { openMapById(id); });
+    });
+  }
+
+  // A map straight from the device's copy (#40), online or not.
+  function showLocal(rec, offlineNow) {
+    var mode = rec.access === 'editor' ? 'editor' : rec.access === 'viewer' ? 'viewer' : 'owner';
+    showMap({
+      id: rec.id,
+      doc: rec.doc,
+      revision: typeof rec.revision === 'number' ? rec.revision : 0,
+      baseDoc: rec.baseDoc || rec.doc,
+    }, mode, false, rec, offlineNow);
+  }
+
+  // The device's copy of one map, or the usual error when there is none.
+  function openLocalOr(id, err, fail) {
+    if (!Off || !ns || !Off.available()) { fail(); return; }
+    Off.getMap(ns, id).then(function (rec) {
+      if (rec && rec.doc) showLocal(rec, true);
+      else fail();
+    });
+  }
+
+  function openLocalRecord(id) {
+    render(root.M2Canvas.loadingEl());
+    if (!Off || !ns || !Off.available()) { mapError({ status: 404 }); return; }
+    Off.getMap(ns, id).then(function (rec) {
+      if (!rec || !rec.doc) { mapError({ status: 404 }); return; }
+      showLocal(rec, !root.navigator.onLine);
     });
   }
 
@@ -610,8 +967,18 @@
     api('GET', '/api/shared/' + encodeURIComponent(token)).then(function (r) {
       // A dead link answers { map: null } rather than a 404 (see server.js).
       if (!r.map) { mapError({ status: 404 }); return; }
-      showMap(r.map, r.access === 'owner' || r.access === 'editor' ? r.access : 'viewer', !!r.guest);
+      showMap(r.map, r.access === 'owner' || r.access === 'editor' ? r.access : 'viewer',
+        !!r.guest, null);
     }).catch(function (err) {
+      if (err.offline && Off && ns && Off.available()) {
+        // The link's map, from the device's copy, found by its share token.
+        Off.localMaps(ns).then(function (recs) {
+          var hit = (recs || []).filter(function (rec) { return rec.shareToken === token; })[0];
+          if (hit) showLocal(hit, true);
+          else mapError(err, function () { openShared(token); });
+        });
+        return;
+      }
       mapError(err, function () { openShared(token); });
     });
   }
@@ -637,6 +1004,12 @@
   // ── Start flow, with no hash ─────────────────────────────────────────
   function startFlow() {
     render(root.M2Canvas.loadingEl());
+    // Offline (#40): with no remembered identity there is nothing on this
+    // device to open, so the load genuinely fails.
+    if (root.navigator.onLine === false) {
+      startOffline();
+      return;
+    }
     api('GET', '/api/maps').then(function (r) {
       if (r.guest) {
         // A visitor plays with the example map, but nothing is kept.
@@ -658,7 +1031,27 @@
       if (lisbon) openMapById(lisbon.id);
       else if (r.maps.length) openMapById(r.maps[0].id);
       else location.hash = '#/maps';
-    }).catch(function () { startError(); });
+    }).catch(function (err) {
+      if (err.offline) { startOffline(); return; }
+      startError();
+    });
+  }
+
+  // Offline start (#40): a guest still gets the in-memory example; anyone
+  // else gets the newest map saved on this device, or the list's offline
+  // copy, which shows what is on the device and needs a connection for
+  // anything else.
+  function startOffline() {
+    if (!Off || !ns || !Off.available()) { startError(); return; }
+    Off.getList(ns).then(function (list) {
+      var recs = (list || []);
+      if (!recs.length) { startError(); return; }
+      recs.sort(function (a, b) { return (b.updatedAt || 0) - (a.updatedAt || 0); });
+      Off.getMap(ns, recs[0].id).then(function (rec) {
+        if (!rec || !rec.doc) { startError(); return; }
+        showLocal(rec, true);
+      });
+    });
   }
 
   // The doc of maps[0] is not in the list response, so open it by id.
@@ -675,6 +1068,13 @@
   }
 
   // ── Router ───────────────────────────────────────────────────────────
+  // A successful call means the connection is back (#40): the kick fires
+  // from api.js, and the browser's online event covers coming back without
+  // making a call. The boot pass itself rides on the first successful call.
+  if (Off) {
+    Off.onKick(function () { syncAll(); });
+    window.addEventListener('online', function () { syncAll(); });
+  }
   window.addEventListener('hashchange', function () {
     if (saverRef && saverRef.hasUnsaved()) saverRef.flushNow();
     route();

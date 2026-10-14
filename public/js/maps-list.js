@@ -6,6 +6,9 @@
   'use strict';
   var M = root.M2Model;
   var api = root.M2Api.api;
+  var Off = root.M2Offline;
+  var ns = root.M2Api.ns;
+  var OFFLINE_MSG = 'You’re offline. This needs a connection.';
   var COLOR_CLASSES = ['c-teal', 'c-amber', 'c-violet', 'c-rose', 'c-sky', 'c-green', 'c-orange', 'c-indigo', 'c-pink', 'c-slate'];
 
   function el(tag, cls, text) {
@@ -73,6 +76,7 @@
     var trashedCount = 0;
     var guest = false;
     var demo = !!opts.demo;
+    var offline = false;
     var swipeHandles = [];
 
     var head = el('header');
@@ -136,6 +140,7 @@
     }
 
     function confirmDelete(map) {
+      if (offline) { un.toast(OFFLINE_MSG); return; }
       un.alert({
         title: 'Delete ' + map.title + '?',
         message: 'It stays in Recently deleted for 30 days.',
@@ -157,6 +162,8 @@
                     },
                   },
                 });
+                // The device's copy goes with it (#40).
+                if (Off && ns) Off.removeMap(ns, map.id);
                 load();
               }).catch(function () {
                 un.toast('Couldn’t delete ' + map.title);
@@ -168,6 +175,7 @@
     }
 
     function renameMap(map) {
+      if (offline) { un.toast(OFFLINE_MSG); return; }
       var form = el('form');
       form.style.cssText = 'display:flex;flex-direction:column;gap:12px;padding:4px 4px 12px';
       var label = el('label', 'section-label', 'Map name');
@@ -231,6 +239,13 @@
         nameRow.appendChild(el('span', 'role-pill',
           map.role === 'editor' ? 'Can edit' : 'Can view'));
       }
+      // Offline (#40): a row whose edits are waiting, or a map this device
+      // made up, is still openable — the pill says it isn't on the server
+      // yet.
+      if (offline && (map.pending || map.temp)) {
+        nameRow.appendChild(el('span', 'role-pill', 'Offline'));
+      }
+      if (map.unavailable) row.classList.add('is-unavailable');
       nameBtn.appendChild(nameRow);
       nameBtn.appendChild(el('p', 'text-small text-muted', meta));
       var spoken = 'Open ' + map.title + ', ' + meta;
@@ -302,6 +317,15 @@
       body.appendChild(list);
     }
 
+    // What a row says under its name: waiting edits and device-made maps
+    // say so instead of just the idea count (#40); a server-only row says
+    // it needs a connection.
+    function metaFor(map) {
+      if (map.unavailable) return 'Needs a connection';
+      if (offline && (map.pending || map.temp)) return ideasText(map) + ', waiting to sync';
+      return ideasText(map);
+    }
+
     function render() {
       swipeHandles.forEach(function (h) { h.detach(); });
       swipeHandles = [];
@@ -310,7 +334,7 @@
       if (demo) body.appendChild(el('h2', 'section-label', 'Staging demo maps'));
       var list = el('ul', 'list');
       listData.forEach(function (map) {
-        var row = mapRow(map, ideasText(map));
+        var row = mapRow(map, metaFor(map));
         if (!guest) {
           var more = el('button', 'text-muted');
           more.type = 'button';
@@ -355,6 +379,7 @@
       api('GET', '/api/maps').then(function (r) {
         guest = !!r.guest;
         demo = !!r.demo;
+        offline = false;
         if (guest) {
           // A visitor plays with the example map, but nothing is kept.
           var doc = root.M2Example.exampleDoc();
@@ -364,12 +389,35 @@
           }];
         } else {
           listData = r.maps;
+          // Keep the list on the device: this is what offline Your maps
+          // (#40) reads when the same call later fails.
+          if (Off && ns) Off.putList(ns, r.maps);
         }
         sharedData = guest ? [] : (r.shared || []);
         trashedCount = guest ? 0 : (r.trashed || 0);
         newBtn.hidden = guest;
         if (listData.length === 0) setEmpty(); else render();
-      }).catch(function () { setError(); });
+      }).catch(function (err) {
+        if (err.offline) { loadOffline(); return; }
+        setError();
+      });
+    }
+
+    // Offline (#40): the device's copy of the list, with its pending edits
+    // and the maps it made up folded in, and rows that only live on the
+    // server marked so.
+    function loadOffline() {
+      if (!Off || !ns || !Off.available()) { setError(); return; }
+      root.Promise.all([Off.getList(ns), Off.localMaps(ns)]).then(function (got) {
+        var rows = Off.mergeList(got[0] || [], got[1] || []);
+        if (!rows.length) { setError(); return; }
+        offline = true;
+        listData = rows;
+        sharedData = [];
+        trashedCount = 0;
+        newBtn.hidden = false;
+        render();
+      });
     }
 
     function openNew() {
@@ -392,6 +440,26 @@
         e.preventDefault();
         var v = input.value.trim();
         if (!v) return;
+        // Offline (#40): a new map starts as this device's own, with a
+        // temporary id, and the sync pass gives it a real one when the
+        // connection is back.
+        if (root.navigator.onLine === false && Off && ns && Off.available()) {
+          var offlineDoc = {
+            v: 1,
+            nodes: [{ id: 'root', parent: null, text: v, x: 0, y: 0 }],
+            layout: { auto: true },
+          };
+          var rec = {
+            id: Off.newTempId(), doc: offlineDoc, revision: 0, baseDoc: offlineDoc,
+            access: 'owner', pending: true, temp: true, title: v, ideaCount: 1,
+            openedAt: Date.now(), updatedAt: new Date().toISOString(),
+          };
+          Off.putMap(ns, rec).then(function () {
+            handle.dismiss();
+            opts.onOpen(rec.id);
+          });
+          return;
+        }
         handle.dismiss();
         api('POST', '/api/maps', { title: v })
           .then(function (r) { opts.onOpen(r.map.id); })

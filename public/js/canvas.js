@@ -217,6 +217,7 @@
 
     // Top bar: Maps, the demo and View only pills, save status, Share and Fit.
     var topbar = el('header', 'topbar');
+    var offlinePill = null;
     if (opts.onOpenMaps) {
       var mapsBtn = el('button', 'btn-secondary');
       mapsBtn.type = 'button';
@@ -226,10 +227,15 @@
       mapsBtn.addEventListener('click', opts.onOpenMaps);
       topbar.appendChild(mapsBtn);
     }
-    if (opts.demo || readOnly) {
+    {
       var pills = el('div', 'top-pills');
       if (opts.demo) pills.appendChild(el('span', 'demo-pill', 'Staging demo'));
       if (readOnly) pills.appendChild(el('span', 'view-pill', 'View only'));
+      // Offline (#40): hidden until the page says the connection is gone.
+      // It stays on narrow phones, unlike the staging pill.
+      offlinePill = el('span', 'offline-pill', 'Offline');
+      offlinePill.hidden = true;
+      pills.appendChild(offlinePill);
       topbar.appendChild(pills);
     }
     var topRight = el('div', 'top-right');
@@ -491,6 +497,7 @@
       statusEl.classList.toggle('is-edited', kind === 'edited');
       if (kind === 'saving') { statusEl.textContent = 'Saving'; }
       else if (kind === 'saved') { statusEl.textContent = ''; statusEl.appendChild(icon('check')); statusEl.appendChild(document.createTextNode('Saved')); }
+      else if (kind === 'local') { statusEl.textContent = 'Saved on this device'; }
       else if (kind === 'error') { statusEl.textContent = 'Not saved'; }
       else if (kind === 'conflict') { statusEl.textContent = 'Changed elsewhere'; }
       else if (kind === 'guest') { statusEl.textContent = 'Sign in to save'; }
@@ -506,6 +513,19 @@
       else if (kind === 'saved' && saveFailing) { saveFailing = false; announce('Saved'); }
     }
     setStatus(opts.initialStatus || 'none');
+
+    // The Offline pill (#40), at the connection's edges only: shown when
+    // saving last failed because the network was gone, hidden when a
+    // request gets through. Saying the change once keeps the live region
+    // quiet while edits pile up offline.
+    var offlineShown = false;
+    function setOffline(on) {
+      if (on === offlineShown) return;
+      offlineShown = on;
+      if (offlinePill) offlinePill.hidden = !on;
+      if (on) announce('Offline. Changes are saved on this device');
+      else announce('Back online');
+    }
     // A map someone else just saved opens with the news: who and when. The
     // first save here (Saving) replaces it.
     if (opts.editedBy) setStatus('edited');
@@ -3152,6 +3172,7 @@
     return {
       el: rootEl,
       setStatus: setStatus,
+      setOffline: setOffline,
       applyRemote: applyRemote,
       setPresence: setPresence,
       setLive: setLive,
