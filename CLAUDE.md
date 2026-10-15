@@ -274,3 +274,23 @@ Re-theme by changing the token values there, keeping every text pair at
   and peer presence (rings, tags, the initials in the top bar) is view
   state rendered by `setPresence` in `canvas.js` — never recorded, never
   in the doc.
+
+- Keep working offline (#40): `public/js/offline-store.js` (`M2Offline`,
+  IndexedDB `m2-offline`, storage namespaced per person from the token
+  payload, `m2.offline.who` remembered in localStorage when the page loads
+  with no token) holds the last 20 opened maps plus the last list answer,
+  guarded so a refused store resolves to null everywhere. `public/sw.js`
+  precaches only the app shell (`m2-shell-v1`) and is network-first — it
+  never touches `/api/` or `/usernode-*`. Edits save to the device first
+  when a write can't get through (`pending` on the record; the canvas says
+  "Saved on this device" and the top bar shows Offline), a new map made
+  offline gets a temp id (`local-…`), and `app.js`'s sync pass (boot kick
+  after the first successful call, on `online`, on `M2Offline.kick()`)
+  syncs them one at a time — POST for temp maps with a `retarget` to the
+  real id, PUT with `baseRevision` and `M2Merge.merge` on 409, 404 drops
+  the local copy with a toast. Your maps offline reads
+  `M2Offline.mergeList(getList(), localMaps())` (device-made rows first,
+  rows with no local copy marked unavailable). Any edit that changes a
+  record's doc must end in `putMap` through the saver's `putLocal`; the
+  pure helpers (`tokenIdentity`, `evictions`, `mergeList`) are exported
+  for `test/offline-store.test.js`.

@@ -147,6 +147,9 @@
   .list-row {
     @apply flex min-h-11 items-center gap-3 px-4 py-3;
   }
+  /* Offline (#40): a row whose map only lives on the server, seen while
+     there is no connection, sits back a little. */
+  .list-row.is-unavailable { opacity: .6; }
 
   /* A radio choice in a list row (<label class="list-row"> wrapping a real
      <input type="radio" class="choice">): a muted ring, an ink ring with a
@@ -620,10 +623,13 @@
   .topbar .btn-secondary {
     box-shadow: 0 1px 2px rgb(var(--fg) / 0.06);
   }
-  /* The pale pills: "Staging demo", and "View only" on a map shared with
-     you. They give way first when a narrow top bar runs out of room. */
+  /* The pale pills: "Staging demo", "View only" on a map shared with you,
+     and "Offline" while the connection is gone (#40). They give way first
+     when a narrow top bar runs out of room — the Offline pill excepted: it
+     is the one thing that says why saving stopped, so it stays. */
   .demo-pill,
-  .view-pill {
+  .view-pill,
+  .offline-pill {
     font-size: 14px;
     line-height: 20px;
     font-weight: 500;
@@ -669,6 +675,9 @@
     .topbar .save-status.is-edited,
     .topbar .demo-pill {
       display: none;
+    }
+    .topbar .offline-pill {
+      display: inline-block; /* never hidden: it explains the save status */
     }
   }
   .top-right {
