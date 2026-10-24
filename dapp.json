@@ -45,6 +45,11 @@
       "expectText": "Staging demo maps"
     },
     {
+      "name": "map.demo-import",
+      "path": "/?demo=1#/maps",
+      "expectText": "Import"
+    },
+    {
       "name": "map.first-visit-example",
       "path": "/",
       "expectText": "Welcome to M2"

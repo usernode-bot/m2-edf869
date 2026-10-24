@@ -187,6 +187,54 @@
     @apply mb-2 px-1 text-small font-medium text-muted;
   }
 
+  /* Your maps' header: the title and its actions. On a phone the title takes
+     its own line and Import and New map share the row under it, so both fit. */
+  .maps-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .maps-actions { display: flex; gap: 8px; }
+  @media (max-width: 480px) {
+    .maps-head { flex-direction: column; align-items: stretch; }
+    .maps-actions > * { flex: 1; }
+  }
+
+  /* Import (#28): the dashed outline while a file is dragged over Your maps,
+     and the summary's list of what had to change to fit M2. */
+  .drop-zone {
+    position: absolute;
+    inset: 8px;
+    border: 2px dashed rgb(var(--muted));
+    border-radius: 16px;
+    background: rgb(var(--ground) / 0.6);
+    pointer-events: none;
+  }
+  .drop-label {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    background: rgb(var(--surface));
+    border: 1px solid rgb(var(--line));
+    border-radius: 12px;
+    padding: 12px 20px;
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .import-changes {
+    margin: 0;
+    padding-left: 20px;
+    list-style: disc;
+    color: rgb(var(--muted));
+    font-size: 14px;
+    line-height: 20px;
+  }
+
   /* The states of anything that loads data. Show exactly one at a time. */
   .skeleton {
     @apply rounded-md bg-line motion-safe:animate-pulse;

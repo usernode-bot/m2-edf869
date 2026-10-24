@@ -68,7 +68,7 @@
       attachSwipeActions: function () { return { close: function () {}, detach: function () {} }; },
     };
     var wrap = el('div');
-    wrap.style.cssText = 'min-height:100vh;padding:16px 16px 32px';
+    wrap.style.cssText = 'min-height:100vh;padding:16px 16px 32px;position:relative';
     container.textContent = '';
     container.appendChild(wrap);
     var listData = null;
@@ -77,17 +77,23 @@
     var guest = false;
     var demo = !!opts.demo;
     var offline = false;
+    var sheetOpen = false;
     var swipeHandles = [];
 
-    var head = el('header');
-    head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:20px';
+    var head = el('header', 'maps-head');
     var title = el('h1', 'text-title', 'Your maps');
+    var actions = el('div', 'maps-actions');
+    var importBtn = el('button', 'btn-secondary');
+    importBtn.type = 'button';
+    importBtn.appendChild(document.createTextNode('Import'));
     var newBtn = el('button', 'btn-primary');
     newBtn.type = 'button';
     newBtn.appendChild(icon('plus'));
     newBtn.appendChild(document.createTextNode('New map'));
+    actions.appendChild(importBtn);
+    actions.appendChild(newBtn);
     head.appendChild(title);
-    head.appendChild(newBtn);
+    head.appendChild(actions);
     wrap.appendChild(head);
 
     var body = el('div');
@@ -396,6 +402,7 @@
         sharedData = guest ? [] : (r.shared || []);
         trashedCount = guest ? 0 : (r.trashed || 0);
         newBtn.hidden = guest;
+        importBtn.hidden = guest;
         if (listData.length === 0) setEmpty(); else render();
       }).catch(function (err) {
         if (err.offline) { loadOffline(); return; }
@@ -469,6 +476,185 @@
       setTimeout(function () { input.focus(); }, 60);
     }
 
+    // Import (#28): a file or a pasted outline read on this device into a
+    // new private map. Nothing is created until Import is pressed on the
+    // summary, so a file M2 can't read leaves no trace.
+    function openImport(file) {
+      if (guest) return;
+      var Imp = root.M2Import;
+      if (!Imp) { un.toast('Couldn’t open the importer'); return; }
+      if (offline || root.navigator.onLine === false) { un.toast(OFFLINE_MSG); return; }
+
+      var content = el('div');
+      content.style.cssText = 'display:flex;flex-direction:column;gap:12px;padding:4px 4px 12px';
+      sheetOpen = true;
+      var handle = un.presentSheet({
+        contentEl: content,
+        onDismiss: function () { sheetOpen = false; },
+      });
+
+      function errorLine() {
+        var p = el('p', 'text-small');
+        p.style.color = 'rgb(var(--danger))';
+        p.setAttribute('role', 'alert');
+        return p;
+      }
+
+      function readFile(f) {
+        if (f.size > Imp.MAX_FILE_BYTES) { showChoose(Imp.ERR_TOO_BIG); return; }
+        f.text().then(function (text) {
+          var r = Imp.read(text, f.name);
+          if (r.error) { showChoose(r.error); return; }
+          showSummary(r);
+        }).catch(function () { showChoose(Imp.ERR_UNREADABLE); });
+      }
+
+      function showChoose(message) {
+        content.textContent = '';
+        content.appendChild(el('h2', 'text-heading', 'Import a map'));
+        content.appendChild(el('p', 'text-small text-muted',
+          'Markdown, OPML, FreeMind, plain text outlines or an M2 file. It becomes a new private map.'));
+
+        var pick = el('button', 'btn-secondary', 'Choose a file');
+        pick.type = 'button';
+        pick.style.width = '100%';
+        var input = el('input');
+        input.type = 'file';
+        input.accept = '.md,.markdown,.txt,.opml,.mm,.json';
+        input.hidden = true;
+        pick.addEventListener('click', function () { input.click(); });
+        input.addEventListener('change', function () {
+          var f = input.files && input.files[0];
+          if (f) readFile(f);
+          input.value = '';
+        });
+        content.appendChild(pick);
+        content.appendChild(input);
+
+        var err = errorLine();
+        if (message) err.textContent = message;
+        content.appendChild(err);
+
+        var label = el('label', 'section-label', 'Or paste an outline');
+        var area = el('textarea', 'field');
+        area.rows = 5;
+        area.placeholder = 'e.g. one idea per line, indented under the idea it belongs to';
+        label.htmlFor = area.id = 'import-paste-field';
+        var go = el('button', 'btn-primary', 'Continue');
+        go.type = 'button';
+        go.style.width = '100%';
+        go.disabled = !area.value.trim();
+        area.addEventListener('input', function () { go.disabled = !area.value.trim(); });
+        go.addEventListener('click', function () {
+          if (!area.value.trim()) return;
+          var r = Imp.read(area.value, null);
+          if (r.error) { err.textContent = r.error; return; }
+          showSummary(r);
+        });
+        content.appendChild(label);
+        content.appendChild(area);
+        content.appendChild(go);
+      }
+
+      function showSummary(result) {
+        content.textContent = '';
+        content.appendChild(el('h2', 'text-heading', 'Import a map'));
+
+        var sum = el('div');
+        sum.style.cssText = 'display:flex;align-items:center;gap:12px;min-width:0';
+        sum.appendChild(thumbSvg(M.outline(result.doc)));
+        var lines = Imp.summaryLines(result);
+        sum.appendChild(el('p', 'text-body font-semibold', lines[0]));
+        content.appendChild(sum);
+
+        if (lines.length > 1) {
+          var changes = el('ul', 'import-changes');
+          lines.slice(1).forEach(function (t) { changes.appendChild(el('li', null, t)); });
+          content.appendChild(changes);
+        }
+
+        var err = errorLine();
+        content.appendChild(err);
+
+        var row = el('div');
+        row.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
+        var back = el('button', 'btn-secondary', 'Back');
+        back.type = 'button';
+        back.addEventListener('click', function () { showChoose(); });
+        var go = el('button', 'btn-primary', 'Import');
+        go.type = 'button';
+        go.addEventListener('click', function () {
+          go.disabled = true;
+          back.disabled = true;
+          api('POST', '/api/maps', { from: 'import', doc: result.doc }).then(function (res) {
+            sheetOpen = false;
+            handle.dismiss();
+            opts.onOpen(res.map.id);
+          }).catch(function () {
+            go.disabled = false;
+            back.disabled = false;
+            err.textContent = 'Couldn’t create the map. Nothing was created. Try again.';
+          });
+        });
+        row.appendChild(back);
+        row.appendChild(go);
+        content.appendChild(row);
+      }
+
+      if (file) readFile(file);
+      else showChoose();
+    }
+
+    // Drop a file anywhere on Your maps: a dashed outline while it is over
+    // the screen, then the Import sheet straight at the summary (or at the
+    // reason it can't be read). The first file only.
+    var dropEl = null;
+    var dragDepth = 0;
+
+    function fileDrag(e) {
+      var types = (e.dataTransfer && e.dataTransfer.types) || [];
+      return Array.prototype.indexOf.call(types, 'Files') !== -1;
+    }
+
+    function showDrop() {
+      if (dropEl) return;
+      dropEl = el('div', 'drop-zone');
+      dropEl.appendChild(el('p', 'drop-label', 'Drop a file to import it'));
+      wrap.appendChild(dropEl);
+    }
+
+    function hideDrop() {
+      if (dropEl && dropEl.parentNode) dropEl.parentNode.removeChild(dropEl);
+      dropEl = null;
+    }
+
+    wrap.addEventListener('dragenter', function (e) {
+      if (!fileDrag(e)) return;
+      e.preventDefault();
+      dragDepth++;
+      if (!guest && !sheetOpen) showDrop();
+    });
+    wrap.addEventListener('dragover', function (e) {
+      if (!fileDrag(e)) return;
+      e.preventDefault();
+      if (!guest && !sheetOpen) showDrop();
+    });
+    wrap.addEventListener('dragleave', function (e) {
+      if (!fileDrag(e)) return;
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) hideDrop();
+    });
+    wrap.addEventListener('drop', function (e) {
+      if (!fileDrag(e)) return;
+      e.preventDefault();
+      dragDepth = 0;
+      hideDrop();
+      if (guest || sheetOpen) return;
+      var f = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) openImport(f);
+    });
+
+    importBtn.addEventListener('click', function () { openImport(); });
     newBtn.addEventListener('click', openNew);
     renderFoot();
     load();
