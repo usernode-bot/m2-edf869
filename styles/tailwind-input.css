@@ -315,16 +315,18 @@
     cursor: pointer;
   }
   /* The tag stays small on the paper; this widens what a finger can hit to
-     at least 44 px each way without drawing anything. Ideas sit above it, so
-     they win, except over two overlapping ideas (.is-over below). */
+     at least 44 px each way on screen without drawing anything. It is sized
+     in world units from --hit-size, which applyTransform keeps at 44 screen
+     px for the current zoom. Ideas sit above it, so they win, except over
+     two overlapping ideas (.is-over below). */
   .link-label::before {
     content: '';
     position: absolute;
-    inset: -12px -4px;
-    min-width: 44px;
     left: 50%;
-    transform: translateX(-50%);
-    width: calc(100% + 8px);
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: max(100%, var(--hit-size, 44px));
+    height: max(100%, var(--hit-size, 44px));
   }
   /* With its two ideas overlapping there is no line, and the label sits over
      them so it can still be tapped. */
@@ -375,7 +377,9 @@
   .idea-main {
     transform: translate(-50%, -50%);
     border-radius: 999px;
-    overflow: hidden;
+    /* Text still wraps inside max-width; overflow stays visible so the
+       invisible 44 px tap area below is not clipped by the pill. */
+    overflow: visible;
     text-overflow: ellipsis;
   }
   .idea-central {
@@ -404,17 +408,22 @@
   .idea-sub.left {
     transform: translate(-100%, -50%);
   }
-  /* A generous hit area around a shallow idea's underline (#39): the pill
-     is a thin line of text, so the invisible band above and below makes it
-     tappable. Pointer events only — it must not swallow the keyboard. */
-  .idea-sub:not(.is-editing)::before {
+  /* A generous hit area around every idea (#39): the pill or underline is
+     drawn at world size, which scrolls and zooms with the map, so a tap
+     target is sized in world units too — --hit-size is set to 44 screen px
+     for the current zoom. Nothing is drawn; ideas stay where they were.
+     Pointer events only — it must not swallow the keyboard. */
+  .idea::after {
     content: '';
     position: absolute;
-    left: 0;
-    right: 0;
-    top: -8px;
-    bottom: -8px;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: max(100%, var(--hit-size, 44px));
+    height: max(100%, var(--hit-size, 44px));
+    border-radius: 8px;
   }
+  .idea.is-editing::after { content: none; }
   /* Ideas wrap only past about 220 px, so short ones stay on one line.
      Newlines are kept (Shift+Enter inside the inline editor puts one in). */
   .idea {

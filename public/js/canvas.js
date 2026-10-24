@@ -146,8 +146,9 @@
     state.appendChild(title);
     state.appendChild(note);
     if (opts.retry) {
-      var retry = el('button', 'btn-secondary', 'Retry');
+      var retry = el('button', 'btn-primary', 'Retry');
       retry.type = 'button';
+      retry.style.width = '100%';
       retry.addEventListener('click', opts.retry);
       state.appendChild(retry);
     }
@@ -1264,6 +1265,10 @@
 
     function applyTransform() {
       world.style.transform = 'translate(' + tx + 'px, ' + ty + 'px) scale(' + scale + ')';
+      // Ideas draw at world size, so their invisible tap areas (#39) are
+      // sized here: 44 screen px at the current zoom, never more than 160
+      // world px so a far-out view's areas do not cover the whole paper.
+      rootEl.style.setProperty('--hit-size', Math.min(160, 44 / scale) + 'px');
       rootEl.style.backgroundPosition = tx + 'px ' + ty + 'px';
       var pc = Math.round(scale * 100) + '%';
       zoomLevel.textContent = pc;
@@ -1384,7 +1389,10 @@
       var top = 60 + 24, bottom = H - barH - 24;
       var availW = W - 48 - 72, availH = Math.max(bottom - top, 120);
       var s = Math.min(availW / Math.max(b.w, 1), availH / Math.max(b.h, 1), 1);
-      scale = Math.max(s, MIN_SCALE);
+      // Never fit smaller than half size: below that an idea's words are
+      // a few pixels tall and cannot be read (a big map may run past the
+      // edges instead). Manual zoom-out can still go to MIN_SCALE.
+      scale = Math.max(s, 0.5);
       var cx = b.x + b.w / 2, cy = b.y + b.h / 2;
       tx = W / 2 - 36 - cx * scale;
       ty = (top + bottom) / 2 - cy * scale;

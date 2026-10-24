@@ -122,10 +122,11 @@
     function setError(retry) {
       body.textContent = '';
       var state = el('div', 'state-error');
-      state.appendChild(el('p', 'text-body font-semibold', 'Couldn’t load your maps.'));
+      state.appendChild(el('p', 'text-body font-semibold', 'Couldn’t load your maps'));
       state.appendChild(el('p', 'text-small text-muted', 'Nothing has been lost. Check your connection and try again.'));
-      var btn = el('button', 'btn-secondary', 'Retry');
+      var btn = el('button', 'btn-primary', 'Retry');
       btn.type = 'button';
+      btn.style.width = '100%';
       btn.addEventListener('click', load);
       state.appendChild(btn);
       body.appendChild(state);
@@ -577,12 +578,14 @@
         content.appendChild(err);
 
         var row = el('div');
-        row.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
+        row.style.cssText = 'display:flex;gap:8px';
         var back = el('button', 'btn-secondary', 'Back');
         back.type = 'button';
+        back.style.flex = '1';
         back.addEventListener('click', function () { showChoose(); });
         var go = el('button', 'btn-primary', 'Import');
         go.type = 'button';
+        go.style.flex = '1';
         go.addEventListener('click', function () {
           go.disabled = true;
           back.disabled = true;
