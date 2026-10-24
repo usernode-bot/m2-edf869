@@ -130,5 +130,9 @@
       "path": "/sw.js",
       "expectText": "m2-shell"
     }
-  ]
+  ],
+  "visibility": {
+    "build": "public",
+    "view": "public"
+  }
 }
