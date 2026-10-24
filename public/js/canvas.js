@@ -146,7 +146,7 @@
     state.appendChild(title);
     state.appendChild(note);
     if (opts.retry) {
-      var retry = el('button', 'btn-secondary', 'Retry');
+      var retry = el('button', 'btn-primary', 'Retry');
       retry.type = 'button';
       retry.addEventListener('click', opts.retry);
       state.appendChild(retry);
@@ -844,7 +844,8 @@
       var s = sizes.get(n.id);
       if (s) return s;
       var b = els.get(n.id);
-      var w = b && b.offsetWidth, h = b && b.offsetHeight;
+      var ink = b && inkSize(b);
+      var w = ink && ink.w, h = ink && ink.h;
       if (!w || !h) return M.estimatedSize(d, n);
       return { w: w, h: h };
     }
@@ -1328,9 +1329,18 @@
       });
     }
 
+    // The visible size of an idea, not its enlarged tap box: clientWidth and
+    // clientHeight leave out the transparent border (and .idea-sub adds back
+    // the underline it draws below). Branches and layout use this.
+    function inkSize(b) {
+      var w = b.clientWidth, h = b.clientHeight;
+      if (b.classList.contains('idea-sub')) h += 3;
+      return { w: w, h: h };
+    }
+
     function widthOf(n) {
       var b = els.get(n.id);
-      if (b && b.offsetWidth) return b.offsetWidth;
+      if (b && b.clientWidth) return inkSize(b).w;
       var s = sizes.get(n.id);
       if (s) return s.w;
       return n.id === '__draft' ? 80 : M.estimatedSize(d, n).w;
@@ -1449,7 +1459,7 @@
       dirtySize.forEach(function (id) {
         var b = els.get(id);
         if (!b) return; // not drawn: the estimate stands until it is
-        var w = b.offsetWidth, h = b.offsetHeight;
+        var ink = inkSize(b), w = ink.w, h = ink.h;
         if (w && h) { sizes.set(id, { w: w, h: h }); dirtySize.delete(id); }
       });
     }
@@ -1535,6 +1545,9 @@
 
     function applyTransform() {
       world.style.transform = 'translate(' + tx + 'px, ' + ty + 'px) scale(' + scale + ')';
+      // The hit padding around each idea and link tag is this many world px
+      // so it is always 44 screen px, however far the map is zoomed out.
+      world.style.setProperty('--tap', (44 / scale) + 'px');
       rootEl.style.backgroundPosition = tx + 'px ' + ty + 'px';
       var pc = Math.round(scale * 100) + '%';
       zoomLevel.textContent = pc;
@@ -1625,8 +1638,9 @@
       // An idea off the view keeps no button, but its box still comes from
       // its cached or estimated size, so links, Fit and the minimap see it.
       if (!b && !sz && n.id !== '__draft' && !M.node(d, n.id)) return null;
-      var w = b ? b.offsetWidth : (sz ? sz.w : M.estimatedSize(d, n).w);
-      var hh = b ? b.offsetHeight : (sz ? sz.h : M.estimatedSize(d, n).h);
+      var ink = b ? inkSize(b) : null;
+      var w = ink ? ink.w : (sz ? sz.w : M.estimatedSize(d, n).w);
+      var hh = ink ? ink.h : (sz ? sz.h : M.estimatedSize(d, n).h);
       if (!w || !hh) { var e = M.estimatedSize(d, n); w = w || e.w; hh = hh || e.h; }
       var at = posOf(n);
       var x0;
@@ -2534,6 +2548,7 @@
       }
       updateCount();
       revealEditor();
+      drawBranchesSoon(); // the new idea grows out of its parent at once
     }
 
     // Keep the edit inside its limit on any way in (a drop, autocorrect):

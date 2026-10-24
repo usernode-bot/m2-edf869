@@ -1082,7 +1082,7 @@
 
   function startError() {
     render(root.M2Canvas.errorEl({
-      title: 'Couldn’t load your maps.',
+      title: 'Couldn’t load your maps',
       message: 'Nothing has been lost. Check your connection and try again.',
       retry: startFlow,
       back: function () { location.hash = '#/maps'; },
