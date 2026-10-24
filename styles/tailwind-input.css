@@ -260,7 +260,9 @@
     background-clip: padding-box;
     color: rgb(var(--muted));
     border-radius: calc(6px + (var(--tap) - 20px) / 2);
-    border: calc((var(--tap) - 20px) / 2) solid transparent;
+    /* +1px before the border is floored to whole pixels, so the tag's box
+       never lands a fraction under the full 44 screen px a finger needs. */
+    border: max(0px, calc((var(--tap) - 20px) / 2 + 1px)) solid transparent;
     padding: 0 6px;
     font-size: 14px;
     line-height: 20px;
@@ -345,7 +347,7 @@
     padding: 12px 22px;
     border-style: solid;
     border-color: transparent;
-    border-width: calc((var(--tap) - 52px) / 2) 0;
+    border-width: max(0px, calc((var(--tap) - 52px) / 2 + 1px)) 0;
   }
   .idea-main {
     background: rgb(var(--surface));
@@ -356,7 +358,7 @@
     font-weight: 600;
     border-style: solid;
     border-color: transparent !important;
-    border-width: calc((var(--tap) - 38px) / 2) calc((var(--tap) - 44px) / 2);
+    border-width: max(0px, calc((var(--tap) - 38px) / 2 + 1px)) max(0px, calc((var(--tap) - 44px) / 2 + 1px));
     box-shadow: inset 0 0 0 2px rgb(var(--ink, var(--fg)));
   }
   .idea-sub {
@@ -366,8 +368,10 @@
     padding: 0 2px 2px;
     display: flex;
     align-items: center;
-    min-width: var(--tap);
-    min-height: var(--tap);
+    /* The extra world px absorbs the sub-pixel loss from the zoom transform,
+       so the box stays at least 44 screen px. */
+    min-width: calc(var(--tap) + 1px);
+    min-height: calc(var(--tap) + 1px);
   }
   .idea-sub.left {
     transform: translate(-100%, -50%);
