@@ -287,7 +287,7 @@ Re-theme by changing the token values there, keeping every text pair at
   payload, `m2.offline.who` remembered in localStorage when the page loads
   with no token) holds the last 20 opened maps plus the last list answer,
   guarded so a refused store resolves to null everywhere. `public/sw.js`
-  precaches only the app shell (`m2-shell-v1`) and is network-first — it
+  precaches only the app shell (`m2-shell-v2`) and is network-first — it
   never touches `/api/` or `/usernode-*`. Edits save to the device first
   when a write can't get through (`pending` on the record; the canvas says
   "Saved on this device" and the top bar shows Offline), a new map made
@@ -301,3 +301,13 @@ Re-theme by changing the token values there, keeping every text pair at
   record's doc must end in `putMap` through the saver's `putLocal`; the
   pure helpers (`tokenIdentity`, `evictions`, `mergeList`) are exported
   for `test/offline-store.test.js`.
+
+- Import (#28) parses on the page only, in `public/js/map-import.js` (pure
+  UMD, `M2Import`): `markdown`/`plainText`/`opml`/`freemind`/`m2` return a
+  tree (or `{ error }`), `sniff` picks the format by extension then content,
+  `buildDoc` fits it to the model's limits (text lengths, `MAX_DEPTH`,
+  `MAX_NODES`), lays it out and validates it, and the page POSTs
+  `{ from: 'import', doc }`. The server never parses files, and nothing is
+  created until Import is pressed on the summary. A new format is a parser
+  there plus a `sniff` rule; a new idea field (notes, URLs, tasks) stops
+  being counted in `lost` and is carried into the doc.

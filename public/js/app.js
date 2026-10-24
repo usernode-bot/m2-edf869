@@ -1081,11 +1081,12 @@
   function openFirst(id) { openMapById(id); }
 
   function startError() {
+    // Retry is the only action: "Back to maps" led straight back into this
+    // same failure.
     render(root.M2Canvas.errorEl({
       title: 'Couldn’t load your maps',
       message: 'Nothing has been lost. Check your connection and try again.',
       retry: startFlow,
-      back: function () { location.hash = '#/maps'; },
     }));
     view = { destroy: function () { app.textContent = ''; } };
   }
@@ -1114,7 +1115,9 @@
     saverRef = null;
     openRef = null;
     current = null;
-    var hash = location.hash;
+    // A query or fragment appended after the route (#/maps?token=…) still
+    // names the same screen; only the part before it decides the route.
+    var hash = location.hash.split(/[?&]/)[0];
     if (hash === '#/maps') { showMaps(); }
     else if (hash === '#/trash') { showTrash(); }
     else if (hash.indexOf('#/map/') === 0) { openMapById(decodeURIComponent(hash.slice(6))); }

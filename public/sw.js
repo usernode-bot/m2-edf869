@@ -17,12 +17,13 @@
  */
 'use strict';
 
-var CACHE = 'm2-shell-v1';
+var CACHE = 'm2-shell-v2';
 
 var SHELL = [
   '/index.html',
   '/tailwind.css',
   '/js/map-model.js',
+  '/js/map-import.js',
   '/js/map-merge.js',
   '/js/live.js',
   '/js/example-map.js',

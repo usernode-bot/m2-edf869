@@ -134,7 +134,9 @@
   // The loading placeholder and the error state, drawn on the dotted canvas.
   function loadingEl() {
     var c = el('div', 'canvas');
-    c.appendChild(el('div', 'load-pill'));
+    var pill = el('div', 'load-pill');
+    pill.appendChild(el('span', 'text-small text-muted', 'Loading…'));
+    c.appendChild(pill);
     return c;
   }
 
@@ -148,6 +150,7 @@
     if (opts.retry) {
       var retry = el('button', 'btn-primary', 'Retry');
       retry.type = 'button';
+      retry.style.width = '100%';
       retry.addEventListener('click', opts.retry);
       state.appendChild(retry);
     }
@@ -1676,7 +1679,10 @@
       var top = 60 + 24, bottom = H - barH - 24;
       var availW = W - 48 - 72, availH = Math.max(bottom - top, 120);
       var s = Math.min(availW / Math.max(b.w, 1), availH / Math.max(b.h, 1), 1);
-      scale = Math.max(s, MIN_SCALE);
+      // Never fit smaller than half size: below that an idea's words are
+      // a few pixels tall and cannot be read (a big map may run past the
+      // edges instead). Manual zoom-out can still go to MIN_SCALE.
+      scale = Math.max(s, 0.5);
       var cx = b.x + b.w / 2, cy = b.y + b.h / 2;
       tx = W / 2 - 36 - cx * scale;
       ty = (top + bottom) / 2 - cy * scale;

@@ -504,7 +504,10 @@ function mapFull(row, viewerName) {
 
 async function insertMap(client, ownerId, doc, now) {
   const id = crypto.randomUUID();
-  const title = doc.nodes[0].text.trim();
+  // The title mirrors the central idea, which validate allows anywhere in
+  // nodes (an imported M2 file may not list it first).
+  const rootNode = doc.nodes.find((n) => n.id === 'root') || doc.nodes[0];
+  const title = rootNode.text.trim();
   await client.query(
     `INSERT INTO maps (id, owner_id, title, doc, idea_count, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, $6)`,
@@ -713,9 +716,9 @@ app.post('/api/maps', async (req, res) => {
     let doc;
     if (req.body && req.body.from === 'example') {
       doc = newExampleDoc();
-    } else if (req.body && req.body.doc !== undefined) {
-      // A whole map, e.g. "Save mine as a copy" after a conflict. It starts
-      // Private at revision 0 like any new map.
+    } else if (req.body && (req.body.from === 'import' || req.body.doc !== undefined)) {
+      // A whole map: an imported file (#28) or "Save mine as a copy" after a
+      // conflict. It starts Private at revision 0 like any new map.
       doc = req.body.doc;
       const why = M2Model.validate(doc);
       if (why) return res.status(400).json({ error: why });
