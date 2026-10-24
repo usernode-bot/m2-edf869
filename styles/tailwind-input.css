@@ -249,6 +249,7 @@
      is moved by the pan) and never scales. */
   .canvas {
     position: relative;
+    --tap: 44px; /* 44 screen px of tap target, whatever the zoom */
     height: 100vh;
     height: 100dvh;
     overflow: hidden;
@@ -303,19 +304,13 @@
   .link-label {
     position: absolute;
     transform: translate(-50%, -50%);
-    /* A 44 screen px target (#28 review) without growing the tag: the box
-       grows and the tag is painted by ::after at its usual height. */
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-width: var(--hit-size, 44px);
-    min-height: var(--hit-size, 44px);
-    box-sizing: border-box;
-    isolation: isolate;
-    background: none;
+    background: rgb(var(--ground));
+    background-clip: padding-box;
     color: rgb(var(--muted));
-    border: 0;
-    border-radius: 6px;
+    border-radius: calc(6px + (var(--tap) - 20px) / 2);
+    /* +1px before the border is floored to whole pixels, so the tag's box
+       never lands a fraction under the full 44 screen px a finger needs. */
+    border: max(0px, calc((var(--tap) - 20px) / 2 + 1px)) solid transparent;
     padding: 0 6px;
     font-size: 14px;
     line-height: 20px;
@@ -334,20 +329,6 @@
     height: 20px;
     border-radius: 6px;
     background: rgb(var(--ground));
-  }
-  /* The tag stays small on the paper; this widens what a finger can hit to
-     at least 44 px each way on screen without drawing anything. It is sized
-     in world units from --hit-size, which applyTransform keeps at 44 screen
-     px for the current zoom. Ideas sit above it, so they win, except over
-     two overlapping ideas (.is-over below). */
-  .link-label::before {
-    content: '';
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    transform: translate(-50%, -50%);
-    width: max(100%, var(--hit-size, 44px));
-    height: max(100%, var(--hit-size, 44px));
   }
   /* With its two ideas overlapping there is no line, and the label sits over
      them so it can still be tapped. */
@@ -383,11 +364,6 @@
     position: absolute;
     width: max-content; /* shrink-wrap: the world div is 0 wide on purpose */
     max-width: 236px;
-    /* Every idea is at least a 44 screen px target (#28 review): --hit-size
-       is 44 screen px in world units, set by applyTransform. */
-    min-width: var(--hit-size, 44px);
-    min-height: var(--hit-size, 44px);
-    box-sizing: border-box;
     background: none;
     border: 0;
     padding: 0;
@@ -403,30 +379,35 @@
   .idea-main {
     transform: translate(-50%, -50%);
     border-radius: 999px;
-    /* The box may be grown to the 44 px target; the words stay centred. */
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    /* Text still wraps inside max-width; overflow stays visible so the
-       invisible 44 px tap area below is not clipped by the pill. */
-    overflow: visible;
+    overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* The visible pill stays the same at any zoom, while a transparent border
+     grows the tappable box to 44 screen px (--tap, set by canvas.js from the
+     zoom); the background is clipped to the padding box so it never grows. */
   .idea-central {
     background: rgb(var(--accent));
+    background-clip: padding-box;
     color: rgb(var(--on-accent));
     font-size: 20px;
     line-height: 28px;
     font-weight: 600;
     padding: 12px 22px;
+    border-style: solid;
+    border-color: transparent;
+    border-width: max(0px, calc((var(--tap) - 52px) / 2 + 1px)) 0;
   }
   .idea-main {
     background: rgb(var(--surface));
-    border: 2px solid;
-    padding: 5px 14px;
+    background-clip: padding-box;
+    padding: 7px 16px;
     font-size: 16px;
     line-height: 24px;
     font-weight: 600;
+    border-style: solid;
+    border-color: transparent !important;
+    border-width: max(0px, calc((var(--tap) - 38px) / 2 + 1px)) max(0px, calc((var(--tap) - 44px) / 2 + 1px));
+    box-shadow: inset 0 0 0 2px rgb(var(--ink, var(--fg)));
   }
   .idea-sub {
     transform: translate(0, -50%);
@@ -435,37 +416,46 @@
     padding: 0 2px 2px;
     display: flex;
     align-items: center;
-    border-bottom: 0;
+    /* The extra world px absorbs the sub-pixel loss from the zoom transform,
+       so the box stays at least 44 screen px. */
+    min-width: calc(var(--tap) + 1px);
+    min-height: calc(var(--tap) + 1px);
   }
-  /* The underline hugs the words, not the grown 44 px box (#28 review). */
-  .idea-sub::before {
+  .idea-sub.left {
+    transform: translate(-100%, -50%);
+    justify-content: flex-end;
+  }
+  /* Its underline is drawn under the words, not at the edge of the grown
+     box, so the tappable band can be taller than the idea looks. */
+  .idea-sub::after {
+    content: '';
+    position: absolute;
+    left: 2px;
+    right: 2px;
+    top: calc(50% + 12px);
+    height: 3px;
+    border-top: 3px solid;
+    border-color: inherit;
+    pointer-events: none;
+  }
+  /* The inline editor is the thing being typed in, not a tap target, so it
+     keeps its visible shape. */
+  .idea.is-editing {
+    min-width: 0;
+    min-height: 0;
+    border-width: 0;
+  }
+  /* A generous hit area around a shallow idea's underline (#39): the pill
+     is a thin line of text, so the invisible band above and below makes it
+     tappable. Pointer events only — it must not swallow the keyboard. */
+  .idea-sub:not(.is-editing)::before {
     content: '';
     position: absolute;
     left: 0;
     right: 0;
-    bottom: calc(50% - 11px);
-    border-bottom: 3px solid;
-    border-color: inherit;
+    top: -8px;
+    bottom: -8px;
   }
-  .idea-sub.left {
-    transform: translate(-100%, -50%);
-  }
-  /* A generous hit area around every idea (#39): the pill or underline is
-     drawn at world size, which scrolls and zooms with the map, so a tap
-     target is sized in world units too — --hit-size is set to 44 screen px
-     for the current zoom. Nothing is drawn; ideas stay where they were.
-     Pointer events only — it must not swallow the keyboard. */
-  .idea::after {
-    content: '';
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    transform: translate(-50%, -50%);
-    width: max(100%, var(--hit-size, 44px));
-    height: max(100%, var(--hit-size, 44px));
-    border-radius: 8px;
-  }
-  .idea.is-editing::after { content: none; }
   /* Ideas wrap only past about 220 px, so short ones stay on one line.
      Newlines are kept (Shift+Enter inside the inline editor puts one in). */
   .idea {
@@ -564,16 +554,16 @@
 
   /* One colour per branch, from the centre to its tips. Whole literal class
      names, so Tailwind sees them. */
-  .c-teal { stroke: rgb(var(--branch-teal)); border-color: rgb(var(--branch-teal)); }
-  .c-amber { stroke: rgb(var(--branch-amber)); border-color: rgb(var(--branch-amber)); }
-  .c-violet { stroke: rgb(var(--branch-violet)); border-color: rgb(var(--branch-violet)); }
-  .c-rose { stroke: rgb(var(--branch-rose)); border-color: rgb(var(--branch-rose)); }
-  .c-sky { stroke: rgb(var(--branch-sky)); border-color: rgb(var(--branch-sky)); }
-  .c-green { stroke: rgb(var(--branch-green)); border-color: rgb(var(--branch-green)); }
-  .c-orange { stroke: rgb(var(--branch-orange)); border-color: rgb(var(--branch-orange)); }
-  .c-indigo { stroke: rgb(var(--branch-indigo)); border-color: rgb(var(--branch-indigo)); }
-  .c-pink { stroke: rgb(var(--branch-pink)); border-color: rgb(var(--branch-pink)); }
-  .c-slate { stroke: rgb(var(--branch-slate)); border-color: rgb(var(--branch-slate)); }
+  .c-teal { stroke: rgb(var(--branch-teal)); border-color: rgb(var(--branch-teal)); --ink: rgb(var(--branch-teal)); }
+  .c-amber { stroke: rgb(var(--branch-amber)); border-color: rgb(var(--branch-amber)); --ink: rgb(var(--branch-amber)); }
+  .c-violet { stroke: rgb(var(--branch-violet)); border-color: rgb(var(--branch-violet)); --ink: rgb(var(--branch-violet)); }
+  .c-rose { stroke: rgb(var(--branch-rose)); border-color: rgb(var(--branch-rose)); --ink: rgb(var(--branch-rose)); }
+  .c-sky { stroke: rgb(var(--branch-sky)); border-color: rgb(var(--branch-sky)); --ink: rgb(var(--branch-sky)); }
+  .c-green { stroke: rgb(var(--branch-green)); border-color: rgb(var(--branch-green)); --ink: rgb(var(--branch-green)); }
+  .c-orange { stroke: rgb(var(--branch-orange)); border-color: rgb(var(--branch-orange)); --ink: rgb(var(--branch-orange)); }
+  .c-indigo { stroke: rgb(var(--branch-indigo)); border-color: rgb(var(--branch-indigo)); --ink: rgb(var(--branch-indigo)); }
+  .c-pink { stroke: rgb(var(--branch-pink)); border-color: rgb(var(--branch-pink)); --ink: rgb(var(--branch-pink)); }
+  .c-slate { stroke: rgb(var(--branch-slate)); border-color: rgb(var(--branch-slate)); --ink: rgb(var(--branch-slate)); }
   .b-teal { background: rgb(var(--branch-teal)); }
   .b-amber { background: rgb(var(--branch-amber)); }
   .b-violet { background: rgb(var(--branch-violet)); }
@@ -957,6 +947,25 @@
   }
 
   /* ── The zoom group, the minimap and the focus chip (#25) ── */
+  /* The dev-only readout (#38): with ?perf=1 on the address it sits under
+     the top bar on the left, like the other things floating over the paper.
+     It never takes a press. */
+  .perf-readout {
+    position: absolute;
+    left: 12px;
+    top: 68px;
+    z-index: 15;
+    padding: 6px 10px;
+    background: rgb(var(--surface));
+    border: 1px solid rgb(var(--line));
+    border-radius: 10px;
+    color: rgb(var(--muted));
+    font-size: 14px;
+    line-height: 20px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+  }
+
   /* The zoom group: a small floating column at the bottom right, over the
      paper and out of its way, like the idea menu. canvas.js sets its bottom
      so it clears the bottom bar on a phone. */
@@ -1232,6 +1241,7 @@
     left: 50%;
     top: 40%;
     transform: translate(-50%, -50%);
+    width: 100%;
     max-width: 300px;
     text-align: center;
     display: flex;
@@ -1239,6 +1249,12 @@
     align-items: center;
     gap: 12px;
     z-index: 10;
+  }
+  /* One way out reads as the main one: Retry fills the width, Back to maps
+     shares it below it. */
+  .canvas-state .btn-primary,
+  .canvas-state .btn-secondary {
+    width: 100%;
   }
   /* The canvas takes the keys, so it never draws its own focus ring — the
      selected idea shows where the keys are instead. */

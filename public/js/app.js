@@ -126,12 +126,29 @@
       opts.onConflict(state.server);
     }
 
+    // An edit that leaves the map exactly as it was last saved (a drag that
+    // ends where it started) has nothing to send: the status reads Saved and
+    // the request is skipped (#38).
+    function unchanged() {
+      if (!state.baseDoc) return false;
+      try { return JSON.stringify(state.doc) === JSON.stringify(state.baseDoc); }
+      catch (e) { return false; }
+    }
+
     function send() {
       clearTimeout(state.timer);
       state.timer = 0;
       if (!state.dirty || state.inFlight || state.dead || state.conflict) return;
       var why = M.validate(state.doc);
       if (why) { setStatus('error'); return; }
+      if (!opts.temp && unchanged()) {
+        state.dirty = false;
+        state.failures = 0;
+        if (local) putLocal(state.doc, false);
+        setStatus('saved');
+        if (state.offlineEdits) { state.offlineEdits = false; if (opts.setOffline) opts.setOffline(false); }
+        return;
+      }
       if (opts.temp) {
         // A map the device made up offline (#40): there is nothing to PUT
         // until the server knows it. The sync pass creates it with a POST
@@ -226,6 +243,12 @@
         // reported rather than lost.
         if (!state.dirty || !state.doc || state.dead || state.conflict) return;
         if (opts.temp) return; // nothing to send until the server knows it (#40)
+        if (unchanged()) { // nothing really changed: no request, already saved
+          state.dirty = false;
+          if (local) putLocal(state.doc, false);
+          setStatus('saved');
+          return;
+        }
         var token = new URLSearchParams(window.location.search).get('token');
         var headers = { 'Content-Type': 'application/json' };
         if (token) headers['x-usernode-token'] = token;

@@ -228,6 +228,13 @@ Re-theme by changing the token values there, keeping every text pair at
   sheet. A save without `baseRevision` (a tab opened before revisions
   existed) still writes, last save wins; drop that path once old tabs are
   gone. Any new write route that changes `doc` must bump `revision` too.
+- Big maps (#38): `map-model.js` keeps a per-doc `byId`/`childrenById` index
+  in a WeakMap, rebuilt when `doc.nodes` changes or a mutator that keeps the
+  array calls `M.touch(doc)` (reparent, undoMove, moveSibling do). Limits are
+  `M.MAX_NODES` (2000), `M.MAX_LINKS` (500) and `M.MAX_DOC_CHARS` (3 MB, the
+  last check `validate` runs). Viewport culling (above `CULL_AT` ideas, in
+  `canvas.js`) and the per-idea size cache are view state only; `?perf=1`
+  shows the dev readout.
 - Avoid adding new dependencies; express, pg and jsonwebtoken cover it.
 - Sibling order is array order in `doc.nodes`, kept the same as the order
   shown on screen (top to bottom on a side). Drag onto an idea, "Move to…"

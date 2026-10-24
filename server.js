@@ -9,7 +9,7 @@ const jwt = require('jsonwebtoken');
 // UMD, so the browser loads it as window.M2Model and the server requires it.
 const M2Model = require('./public/js/map-model');
 const { exampleDoc } = require('./public/js/example-map');
-const { demoMaps, sharedDemoDoc, trashedDemoDoc, teamRetroDoc, lisbonVersions } = require('./server/demo-maps');
+const { demoMaps, sharedDemoDoc, trashedDemoDoc, teamRetroDoc, lisbonVersions, bigDemoDoc } = require('./server/demo-maps');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -45,7 +45,7 @@ const GUEST_PUBLIC_KEY = (process.env.USERNODE_GUEST_JWT_PUBLIC_KEY || '')
 // Everything else requires a valid platform-issued JWT.
 const PUBLIC_API_PATHS = new Set(['/health']);
 
-app.use(express.json({ limit: '512kb' }));
+app.use(express.json({ limit: '4mb' })); // a map's doc may reach 3 MB (#38)
 
 // The platform's three centrally hosted files — the bridge, the native UI
 // kit and the Tailwind runtime — are reachable at these paths on this app's
@@ -263,6 +263,16 @@ async function bootSchema() {
        VALUES ('demo-shared-link', $1, $2, $3, $4, now(), now(), 'link', 'staging-demo-link')
        ON CONFLICT (id) DO NOTHING`,
       [DEMO_FRIEND, doc.nodes[0].text, JSON.stringify(doc), doc.nodes.length]
+    );
+    // A second, view-only copy of the big demo map (#38), reachable by a
+    // fixed secret link so the big-map check can open it signed out. Staging
+    // only.
+    const big = bigDemoDoc();
+    await pool.query(
+      `INSERT INTO maps (id, owner_id, title, doc, idea_count, created_at, updated_at, visibility, share_token)
+       VALUES ('demo-big-link', $1, $2, $3, $4, now(), now(), 'link', 'staging-demo-big')
+       ON CONFLICT (id) DO NOTHING`,
+      [DEMO_FRIEND, big.nodes[0].text, JSON.stringify(big), big.nodes.length]
     );
     // A fake person's map trashed 31 days ago, so the boot purge below can
     // be seen removing it: the acceptance check that anything past 30 days
@@ -593,6 +603,17 @@ app.get('/api/maps', async (req, res) => {
           trashed.nodes.length, new Date(req.now.getTime() - 19 * 86400000),
           new Date(req.now.getTime() - 18 * 86400000)]
       );
+      // The big-map demo (#38): the viewer's own copy, updated 28 days ago
+      // so it lists last and the first-visit flow still opens Lisbon.
+      // Idempotent on every ?demo=1 load, so accounts that saw the demo
+      // before get it too.
+      const big = bigDemoDoc();
+      await pool.query(
+        `INSERT INTO maps (id, owner_id, title, doc, idea_count, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $6) ON CONFLICT (id) DO NOTHING`,
+        ['demo-' + ownerId + '-big', ownerId, big.nodes[0].text, JSON.stringify(big),
+          big.nodes.length, new Date(req.now.getTime() - 28 * 86400000)]
+      );
       // Two earlier versions of the demo Lisbon map (#32), so Version
       // history has something to show: one from about an hour ago, one from
       // the day before yesterday. Idempotent on every ?demo=1 load, and
@@ -804,11 +825,14 @@ app.put('/api/maps/:id', async (req, res) => {
       );
     }
     const updated = await client.query(
-      `UPDATE maps SET doc = $3, title = $4, idea_count = $5, updated_at = $6,
-         updated_by = $7, revision = revision + 1
+      `UPDATE maps SET doc = $2, title = $3, idea_count = $4, updated_at = $5,
+         updated_by = $6, revision = revision + 1
        WHERE id = $1
        RETURNING revision, updated_at`,
-      [req.params.id, userId, JSON.stringify(doc), doc.nodes[0].text.trim(),
+      // $2 is deliberately absent: the owner-or-editor check is the
+      // SELECT above, and an unused parameter makes Postgres refuse the
+      // statement ("could not determine data type of parameter $2").
+      [req.params.id, JSON.stringify(doc), doc.nodes[0].text.trim(),
         doc.nodes.length, req.now, String(req.user.username || '')]
     );
     if (reason) await pruneVersions(client, req.params.id);

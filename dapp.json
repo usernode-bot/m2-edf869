@@ -2,7 +2,7 @@
   "description": "Build modern, easy-to-use mind maps",
   "icon": {
     "image": "brand/icon.png",
-    "emoji": "🧠"
+    "emoji": "\ud83e\udde0"
   },
   "secrets": [],
   "governance": {
@@ -134,6 +134,15 @@
       "name": "app.service-worker",
       "path": "/sw.js",
       "expectText": "m2-shell"
+    },
+    {
+      "name": "map.demo-big-map",
+      "path": "/?share=staging-demo-big",
+      "expectSelector": ".idea-central"
     }
-  ]
+  ],
+  "visibility": {
+    "build": "public",
+    "view": "public"
+  }
 }
