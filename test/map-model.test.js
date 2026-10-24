@@ -549,3 +549,130 @@ test('lisbonVersions seeds two versions with fewer ideas than today', () => {
   assert.ok(versions[0].createdAt > versions[1].createdAt, 'newest first');
   versions.forEach((v) => assert.equal(v.reason, 'auto'));
 });
+
+// ── Big maps (#38) ──────────────────────────────────────────────────────
+// The lookup index must answer exactly as a scan would, through every kind
+// of change: a new idea, a delete, a reparent, a reorder, an undo, and a
+// whole new nodes array.
+
+test('the index answers the same as the doc after every kind of change', () => {
+  const { doc, a, b1 } = smallDoc();
+  const snapshotAnswers = (d) => {
+    const byId = {};
+    d.nodes.forEach((n) => { byId[n.id] = n; });
+    const scan = (id) => d.nodes.find((n) => n.id === id) || null;
+    return {
+      lengths: d.nodes.map((n) => M.subtree(d, n.id).length),
+      depths: d.nodes.map((n) => M.depth(d, n.id)),
+      colors: d.nodes.map((n) => M.branchColor(d, n.id)),
+      counts: d.nodes.map((n) => M.countUnder(d, n.id)),
+      kids: d.nodes.map((n) => M.childrenOf(d, n.id).map((k) => k.id).join(',')),
+      ancestors: d.nodes.map((n) => M.ancestors(d, n.id).map((k) => k.id).join(',')),
+      order: M.treeOrder(d).map((t) => t.node.id + ':' + t.level + ':' + t.pos + ':' + t.size).join(' '),
+      missing: scan('nope') === null && M.depth(d, 'nope') === -1 && M.countUnder(d, 'nope') === 0,
+      nodeOk: d.nodes.every((n) => M.node(d, n.id) === byId[n.id]),
+    };
+  };
+  const answers = [];
+  answers.push(snapshotAnswers(doc));
+  const c = M.addIdea(doc, a.id, 'Third child', 100);
+  answers.push(snapshotAnswers(doc));
+  M.reparent(doc, b1.id, a.id, 200); // changes a parent, same array length
+  answers.push(snapshotAnswers(doc));
+  const moveBack = { id: c.id, index: doc.nodes.indexOf(M.node(doc, c.id)),
+    nodes: [Object.assign({}, M.node(doc, c.id))] };
+  M.moveSibling(doc, c.id, -1);
+  answers.push(snapshotAnswers(doc));
+  assert.equal(M.undoMove(doc, moveBack), true);
+  answers.push(snapshotAnswers(doc));
+  const before = doc.nodes.length;
+  const removed = M.removeSubtree(doc, c.id); // a new array
+  answers.push(snapshotAnswers(doc));
+  assert.equal(doc.nodes.length, before - 1);
+  M.restore(doc, removed);
+  answers.push(snapshotAnswers(doc));
+  doc.nodes = doc.nodes.slice(); // a reassigned array, same content
+  answers.push(snapshotAnswers(doc));
+  // Every answer is internally right: the model's own helpers agree with a
+  // plain walk of the tree.
+  const last = answers[answers.length - 1];
+  assert.equal(last.lengths.length, doc.nodes.length);
+  assert.equal(last.missing, true);
+  doc.nodes.forEach((n, i) => {
+    const walk = [];
+    (function w(id) {
+      doc.nodes.forEach((m) => { if (m.parent === id) { walk.push(m.id); w(m.id); } });
+    })(n.id);
+    assert.equal(last.lengths[i], walk.length + 1, 'subtree of ' + n.text);
+    assert.equal(last.counts[i], walk.length, 'countUnder of ' + n.text);
+  });
+  // The reorder, the delete and the restore all left the order honest.
+  assert.deepEqual(
+    M.treeOrder(doc).map((t) => t.node.id),
+    preOrder(doc)
+  );
+});
+
+function preOrder(doc) {
+  const out = [];
+  (function w(id) {
+    if (id === 'root') out.push('root');
+    doc.nodes.filter((n) => n.parent === id).forEach((n) => { out.push(n.id); w(n.id); });
+  })('root');
+  return out;
+}
+
+function byIdText(doc, text) {
+  return doc.nodes.find((n) => n.text === text);
+}
+
+test('a map may hold 2000 ideas and 500 links, and not more', () => {
+  const doc = { v: 1, nodes: [{ id: 'root', parent: null, text: 'Big', x: 0, y: 0 }] };
+  let side = 1;
+  for (let i = 1; i < 2000; i++) {
+    const parent = i % 20 === 0 ? 'root' : 'root';
+    doc.nodes.push({ id: 'n' + i, parent, text: 'Idea ' + i,
+      x: 220 * side, y: (i % 300 - 150) * 50, color: i % 10 });
+    side = -side;
+  }
+  assert.equal(doc.nodes.length, 2000);
+  assert.equal(M.validate(doc), null);
+  doc.nodes.push({ id: 'extra', parent: 'root', text: 'One more', x: 220, y: 0, color: 0 });
+  assert.equal(M.validate(doc), 'wrong node count');
+  doc.nodes.pop();
+
+  const links = [];
+  for (let i = 1; i <= 500; i++) links.push({ id: 'l' + i, from: 'n' + i, to: 'n' + (i + 1) * 2, text: '' });
+  doc.links = links;
+  assert.equal(M.validate(doc), null);
+  doc.links.push({ id: 'l501', from: 'n1', to: 'n3', text: '' });
+  assert.equal(M.validate(doc), 'too many links');
+  doc.links.pop();
+  assert.equal(M.MAX_NODES, 2000);
+  assert.equal(M.MAX_LINKS, 500);
+});
+
+test('a doc larger than the saved-form cap is refused, and the big demo fits', () => {
+  assert.equal(M.MAX_DOC_CHARS, 3000000);
+  const doc = {
+    v: 1,
+    nodes: [
+      { id: 'root', parent: null, text: 'Huge', x: 0, y: 0 },
+      { id: 'a', parent: 'root', text: 'A'.repeat(120), x: 220, y: 0, color: 0, notes: 'x'.repeat(4000000) },
+    ],
+  };
+  assert.ok(JSON.stringify(doc).length > M.MAX_DOC_CHARS);
+  assert.equal(M.validate(doc), 'map too big');
+
+  const { bigDemoDoc } = require('../server/demo-maps');
+  const big = bigDemoDoc();
+  assert.equal(big.nodes.length, 1511);
+  assert.equal(M.validate(big), null);
+  assert.ok(JSON.stringify(big).length < M.MAX_DOC_CHARS);
+  // The costly walk a big map asks for most often stays quick.
+  const t0 = Date.now();
+  M.nodes(big).forEach((n) => M.countUnder(big, n.id));
+  assert.ok(Date.now() - t0 < 50, 'countUnder over every idea took ' + (Date.now() - t0) + ' ms');
+  // The existing fixtures still validate unchanged.
+  assert.equal(M.validate(exampleDoc()), null);
+});

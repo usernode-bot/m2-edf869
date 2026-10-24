@@ -116,7 +116,7 @@
     function setError(retry) {
       body.textContent = '';
       var state = el('div', 'state-error');
-      state.appendChild(el('p', 'text-body font-semibold', 'Couldn’t load your maps.'));
+      state.appendChild(el('p', 'text-body font-semibold', 'Couldn’t load your maps'));
       state.appendChild(el('p', 'text-small text-muted', 'Nothing has been lost. Check your connection and try again.'));
       var btn = el('button', 'btn-secondary', 'Retry');
       btn.type = 'button';

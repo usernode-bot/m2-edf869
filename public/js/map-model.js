@@ -7,7 +7,10 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var MAX_NODES = 500;
+  // A map's limits: 2000 ideas and 500 links, and 3 MB for its saved form
+  // (JSON.stringify of the whole doc), checked by validate() on both sides.
+  var MAX_NODES = 2000;
+  var MAX_DOC_CHARS = 3000000;
   var MAX_TEXT = 120;
   var MAX_ROOT_TEXT = 80;
   var MAX_XY = 20000;
@@ -24,7 +27,7 @@
   var SIBLING_GAP = 16;
   var MAIN_GAP = 24;
   // Links: named lines between any two ideas, outside the tree.
-  var MAX_LINKS = 200;
+  var MAX_LINKS = 500;
   var MAX_LINK_TEXT = 60;
 
   // Main-idea colours, in the order new main branches get them.
@@ -37,30 +40,91 @@
 
   function nodes(doc) { return doc && doc.nodes ? doc.nodes : []; }
 
-  function node(doc, id) {
-    var list = nodes(doc);
-    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
-    return null;
+  // ── Lookup index (#38) ─────────────────────────────────────────────────
+  // Big maps need idea lookups that do not scan the whole array, so each doc
+  // keeps a byId and a childrenById map beside it, rebuilt lazily when its
+  // nodes array is a different one, its length changed, or a mutator that
+  // keeps the array called touch(doc). Both maps live in a WeakMap, so
+  // nothing is added to the doc and nothing extra is ever serialized.
+  var indexCache = new WeakMap(); // doc -> { nodes, len, ver, byId, kids, checked }
+  var touchCounts = new WeakMap(); // doc -> counter, bumped by touch()
+
+  // Tell the index that an in-place mutation (one that keeps doc.nodes and
+  // its length) changed the tree. Every mutator of that kind calls it.
+  function touch(doc) {
+    if (!doc || typeof doc !== 'object') return;
+    touchCounts.set(doc, (touchCounts.get(doc) || 0) + 1);
   }
 
+  function index(doc) {
+    if (!doc || typeof doc !== 'object') {
+      return { nodes: [], len: 0, ver: 0, byId: Object.create(null),
+        kids: Object.create(null), checked: true };
+    }
+    var list = nodes(doc);
+    var ver = touchCounts.get(doc) || 0;
+    var c = indexCache.get(doc);
+    if (c && c.nodes === list && c.len === list.length && c.ver === ver) return c;
+    // No prototype: an idea id such as '__proto__' is just another key.
+    c = { nodes: list, len: list.length, ver: ver,
+      byId: Object.create(null), kids: Object.create(null), checked: false };
+    for (var i = 0; i < list.length; i++) {
+      var n = list[i];
+      if (!n || typeof n.id !== 'string') continue;
+      if (!(n.id in c.byId)) c.byId[n.id] = n;
+      if (n.parent != null) {
+        if (!c.kids[n.parent]) c.kids[n.parent] = [];
+        c.kids[n.parent].push(n);
+      }
+    }
+    indexCache.set(doc, c);
+    return c;
+  }
+
+  function node(doc, id) {
+    if (!id) return null;
+    var ix = index(doc);
+    var found = ix.byId[id];
+    if (found !== undefined) return found;
+    // A miss after a fresh rebuild is a miss. Otherwise a mutation may have
+    // skipped touch(): rebuild once and look again, so a stale index never
+    // answers with the wrong idea or hides a real one.
+    if (ix.checked) return null;
+    ix.checked = true;
+    indexCache.delete(doc);
+    found = index(doc).byId[id];
+    return found === undefined ? null : found;
+  }
+
+  // The ideas directly under one, in doc order. A copy, so a caller may sort
+  // or filter what it gets without touching the index.
   function childrenOf(doc, id) {
-    return nodes(doc).filter(function (n) { return n.parent === id; });
+    var kids = index(doc).kids[id];
+    return kids ? kids.slice() : [];
   }
 
   // Depth in the tree: the root is 0, a main idea 1, everything under it 2+.
   function depth(doc, id) {
-    var d = 0, n = node(doc, id);
-    while (n && n.parent) { d++; n = node(doc, n.parent); }
+    var n = node(doc, id);
+    var ix = index(doc);
+    var d = 0;
+    while (n && n.parent) {
+      d++;
+      if (d > ix.len) return -1; // a cycle in an unvalidated doc
+      n = ix.byId[n.parent];
+    }
     return n ? d : -1;
   }
 
   // The ideas from the root down to, but not including, this one: the
   // breadcrumb trail of a focused branch (#25). An unknown id has none.
   function ancestors(doc, id) {
-    var chain = [], n = node(doc, id);
+    var ix = index(doc);
+    var chain = [], n = id ? ix.byId[id] : null;
+    var hops = 0;
     while (n && n.parent) {
-      n = node(doc, n.parent);
-      if (!n) return [];
+      n = ix.byId[n.parent];
+      if (!n || ++hops > ix.len) return [];
       chain.unshift(n);
     }
     return n ? chain : [];
@@ -69,26 +133,20 @@
   // The colour of the branch an idea sits on: the main-idea ancestor's own.
   function branchColor(doc, id) {
     var n = node(doc, id);
+    var ix = index(doc), hops = 0;
     while (n && n.parent) {
       if (n.color != null) return n.color;
-      n = node(doc, n.parent);
+      n = ix.byId[n.parent];
+      if (++hops > ix.len) return null;
     }
     return null;
   }
 
+  // How many ideas sit under this one: its subtree without itself.
   function countUnder(doc, id) {
-    var all = nodes(doc), n = 0;
-    // Count descendants by walking up each node's ancestors.
-    for (var i = 0; i < all.length; i++) {
-      var p = all[i];
-      if (p.id === id) continue;
-      var a = p;
-      while (a && a.parent) {
-        if (a.parent === id) { n++; break; }
-        a = node(doc, a.parent);
-      }
-    }
-    return n;
+    if (!node(doc, id)) return 0;
+    var n = subtree(doc, id).length - 1;
+    return n > 0 ? n : 0;
   }
 
   function ideaCount(doc) { return nodes(doc).length; }
@@ -341,13 +399,16 @@
   }
 
   function subtree(doc, id) {
-    var out = [], stack = [id];
+    var ix = index(doc);
+    var out = [], stack = [id], seen = 0;
+    if (!id || ix.byId[id] === undefined) return out;
     while (stack.length) {
-      var cur = stack.shift();
-      var n = node(doc, cur);
+      var n = ix.byId[stack.pop()];
       if (!n) continue;
       out.push(n);
-      childrenOf(doc, cur).forEach(function (c) { stack.push(c.id); });
+      if (++seen > ix.len) break; // a cycle in an unvalidated doc
+      var c = ix.kids[n.id];
+      if (c) for (var i = 0; i < c.length; i++) stack.push(c[i].id);
     }
     return out;
   }
@@ -430,6 +491,7 @@
     // Last among its new siblings: array order stays the screen order.
     doc.nodes.splice(record.index, 1);
     doc.nodes.push(n);
+    touch(doc); // parent and order changed, the array did not
     return record;
   }
 
@@ -454,6 +516,7 @@
       doc.nodes.splice(i, 1);
       doc.nodes.splice(record.index, 0, n);
     }
+    touch(doc); // parents and order changed, the array did not
     return true;
   }
 
@@ -493,6 +556,7 @@
     var a = list.indexOf(n), b = list.indexOf(other);
     list[a] = other;
     list[b] = n;
+    touch(doc); // the array was reordered in place
     return true;
   }
 
@@ -988,7 +1052,12 @@
       var lkeys = Object.keys(doc.layout);
       if (lkeys.length !== 1 || lkeys[0] !== 'auto' || typeof doc.layout.auto !== 'boolean') return 'bad layout';
     }
-    return validateLinks(doc, byId);
+    var why = validateLinks(doc, byId);
+    if (why) return why;
+    // The saved form's own ceiling, checked last so every other reason reads
+    // as it always did. A map inside the old limits is far under it.
+    if (JSON.stringify(doc).length > MAX_DOC_CHARS) return 'map too big';
+    return null;
   }
 
   // The optional links array: absent is fine; if present, every link joins
@@ -1054,15 +1123,19 @@
   // whose parent is gone never appears. Pure: the doc comes back untouched.
   function treeOrder(doc) {
     var out = [];
-    var rootN = node(doc, 'root');
+    var ix = index(doc);
+    var rootN = ix.byId.root;
     if (!rootN) return out;
+    var rootKids = ix.kids.root || [];
     out.push({ node: rootN, level: 1, pos: 1, size: 1,
-      hasChildren: childrenOf(doc, 'root').length > 0 });
+      hasChildren: rootKids.length > 0 });
     (function walk(pid, level) {
-      var kids = childrenOf(doc, pid);
+      var kids = ix.kids[pid];
+      if (!kids) return;
       kids.forEach(function (n, i) {
+        var own = ix.kids[n.id];
         out.push({ node: n, level: level, pos: i + 1, size: kids.length,
-          hasChildren: childrenOf(doc, n.id).length > 0 });
+          hasChildren: !!own && own.length > 0 });
         walk(n.id, level + 1);
       });
     })('root', 2);
@@ -1075,6 +1148,7 @@
     MAX_ROOT_TEXT: MAX_ROOT_TEXT,
     MAX_DEPTH: MAX_DEPTH,
     MAX_LINKS: MAX_LINKS,
+    MAX_DOC_CHARS: MAX_DOC_CHARS,
     MAX_LINK_TEXT: MAX_LINK_TEXT,
     COLORS: COLORS,
     pickFreeColor: pickFreeColor,
@@ -1083,6 +1157,7 @@
     node: node,
     nodes: nodes,
     childrenOf: childrenOf,
+    touch: touch,
     depth: depth,
     ancestors: ancestors,
     branchColor: branchColor,

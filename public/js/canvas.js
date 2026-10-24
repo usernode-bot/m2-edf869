@@ -146,7 +146,7 @@
     state.appendChild(title);
     state.appendChild(note);
     if (opts.retry) {
-      var retry = el('button', 'btn-secondary', 'Retry');
+      var retry = el('button', 'btn-primary', 'Retry');
       retry.type = 'button';
       retry.addEventListener('click', opts.retry);
       state.appendChild(retry);
@@ -180,6 +180,10 @@
     var saveTimer = 0;
     var els = new Map(); // node id -> button
     var linkEls = new Map(); // link id -> label button
+    // Each idea's drawn size (#38), measured once and reused by the
+    // branches, the minimap, Fit and tidy, including for ideas off the view.
+    var sizes = new Map(); // id -> { w, h }
+    var dirtySize = new Set(); // ids whose size must be measured again
     // Live co-editing (#34): who else is on this map and which idea each of
     // them holds. Presence is view state: never recorded, never saved.
     var peers = []; // [{ id, username, selectedId, color }] without this screen
@@ -324,6 +328,23 @@
     }
     topbar.appendChild(topRight);
     rootEl.appendChild(topbar);
+
+    // The dev-only readout (#38): with ?perf=1 on the address, how long the
+    // last redraw took and how many ideas are on the map and on the page.
+    var perfOn = false;
+    try { perfOn = new URLSearchParams(location.search).get('perf') === '1'; } catch (e) { perfOn = false; }
+    var perfEl = null;
+    if (perfOn) {
+      perfEl = el('div', 'perf-readout');
+      perfEl.setAttribute('aria-hidden', 'true');
+      rootEl.appendChild(perfEl);
+    }
+    function perfStart() { return perfOn ? performance.now() : 0; }
+    function perfEnd(label, t0) {
+      if (!perfEl) return;
+      perfEl.textContent = 'Redraw ' + Math.round(performance.now() - t0) + ' ms · ' +
+        M.ideaCount(d) + ' ideas, ' + els.size + ' drawn';
+    }
 
     // ── The zoom group, minimap and focus chip (#25) ────────────────────
     // They live over the paper like the bars: fixed size at any zoom, and a
@@ -820,8 +841,11 @@
     }
 
     function measureDom(n) {
+      var s = sizes.get(n.id);
+      if (s) return s;
       var b = els.get(n.id);
-      var w = b && b.offsetWidth, h = b && b.offsetHeight;
+      var ink = b && inkSize(b);
+      var w = ink && ink.w, h = ink && ink.h;
       if (!w || !h) return M.estimatedSize(d, n);
       return { w: w, h: h };
     }
@@ -1018,63 +1042,211 @@
     }
 
     function render() {
+      var t0 = perfStart();
       if (editing) finishEdit(true, false); // a rebuild ends the edit
       closeMenu(); // the buttons are rebuilt, so the menu's anchor would dangle
       endTween();
-      els.forEach(function (old) { if (old.parentNode) old.parentNode.removeChild(old); });
-      els.clear();
-      // Ideas go into the tree layer in tree order, so what a screen reader
-      // walks is the map itself, not the draw order.
+      // Only the ideas near the view (or always drawn) get a button; the
+      // rest keep their place in the doc and come back when the view moves.
+      var vr = viewRect();
       M.treeOrder(d).forEach(function (t) {
-        var n = t.node;
-        var b = el('button', 'idea');
-        b.type = 'button';
-        b.textContent = n.text;
-        b.dataset.id = n.id;
-        b.setAttribute('role', 'treeitem');
-        b.setAttribute('aria-level', String(t.level));
-        b.setAttribute('aria-setsize', String(t.size));
-        b.setAttribute('aria-posinset', String(t.pos));
-        if (t.hasChildren) b.setAttribute('aria-expanded', n.collapsed ? 'false' : 'true');
-        if (n.id === 'root') b.classList.add('idea-central');
-        else if (n.parent === 'root') {
-          b.classList.add('idea-main');
-          b.classList.add(COLOR_CLASSES[n.color || 0]);
-        } else {
-          b.classList.add('idea-sub');
-          var c = M.branchColor(d, n.id);
-          b.classList.add(COLOR_CLASSES[c == null ? 0 : c]);
-          var p = M.node(d, n.parent);
-          if (p && n.x < p.x) b.classList.add('left');
-        }
-        if (n.id === selectedId) b.classList.add('is-selected');
-        if (n.id !== 'root') b.setAttribute('aria-haspopup', 'menu');
-        if (M.depth(d, n.id) >= 3) b.classList.add('lvl-deep');
-        if (focusId && !underFocus(n.id)) b.classList.add('is-dim');
-        if (ghosts && ghosts[n.id]) b.classList.add('is-ghost');
-        b.setAttribute('aria-label', ideaLabel(n));
-        b.style.left = n.x + 'px';
-        b.style.top = n.y + 'px';
-        treeEl.appendChild(b);
-        els.set(n.id, b);
+        if (!shouldDraw(t.node, vr)) return;
+        var b = els.get(t.node.id);
+        if (b && b.getAttribute('role') !== 'treeitem') b = null; // an editor left over
+        if (!b) b = newEl(t.node);
+        paintIdea(b, t);
       });
-      // One label per link; drawBranches() only moves them, so a drag keeps
-      // focus where it is.
-      linkEls.forEach(function (old) { if (old.parentNode) old.parentNode.removeChild(old); });
-      linkEls.clear();
-      M.links(d).forEach(function (l) {
-        var b = el('button', 'link-label');
-        b.type = 'button';
-        b.dataset.link = l.id;
-        labelLayer.appendChild(b);
-        linkEls.set(l.id, b);
+      // Ideas that left the doc, and those now off the view, lose their button.
+      els.forEach(function (b, id) {
+        if (id === '__draft') return;
+        var n = M.node(d, id);
+        if (!n || !shouldDraw(n, vr)) removeIdeaEl(id);
       });
+      syncLinkLabels();
       labelLinks();
       // Branch ends need the measured text widths, so draw after layout.
       requestAnimationFrame(drawBranches);
       drawBranchesSoon();
       refreshFind(); // a rebuild drops the find marks; re-apply them
       renderPeers(); // the rings go back on the fresh buttons
+      perfEnd('render', t0);
+    }
+
+    // A fresh idea button, in the tree layer, in `els` from the start.
+    function newEl(n) {
+      var b = el('button', 'idea');
+      b.type = 'button';
+      b.dataset.id = n.id;
+      b.setAttribute('role', 'treeitem');
+      if (n.id !== 'root') b.setAttribute('aria-haspopup', 'menu');
+      treeEl.appendChild(b);
+      els.set(n.id, b);
+      dirtySize.add(n.id);
+      return b;
+    }
+
+    function removeIdeaEl(id) {
+      var b = els.get(id);
+      if (b && b.parentNode) b.parentNode.removeChild(b);
+      els.delete(id);
+      sizes.delete(id);
+    }
+
+    function setAttr(e, name, value) {
+      if (value == null) {
+        if (e.hasAttribute(name)) e.removeAttribute(name);
+      } else if (e.getAttribute(name) !== value) {
+        e.setAttribute(name, value);
+      }
+    }
+
+    // Give an idea's button what it says and how it looks, writing only what
+    // differs, so a change to one idea leaves the rest of the page alone.
+    function paintIdea(b, t) {
+      var n = t.node;
+      if (b.textContent !== n.text) { b.textContent = n.text; dirtySize.add(n.id); }
+      var isRoot = n.id === 'root';
+      setClass(b, 'idea-central', isRoot);
+      setClass(b, 'idea-main', !isRoot && n.parent === 'root');
+      setClass(b, 'idea-sub', !isRoot && n.parent !== 'root');
+      var col = isRoot ? null : n.parent === 'root' ? (n.color == null ? 0 : n.color) : M.branchColor(d, n.id);
+      for (var i = 0; i < COLOR_CLASSES.length; i++) setClass(b, COLOR_CLASSES[i], col != null && i === col);
+      var left = false;
+      if (!isRoot && n.parent !== 'root') {
+        var p = M.node(d, n.parent);
+        left = !!(p && n.x < p.x);
+      }
+      setClass(b, 'left', left);
+      setClass(b, 'is-selected', n.id === selectedId);
+      setClass(b, 'lvl-deep', M.depth(d, n.id) >= 3);
+      setClass(b, 'is-dim', !!focusId && !underFocus(n.id));
+      setClass(b, 'is-ghost', !!(ghosts && ghosts[n.id]));
+      var lx = n.x + 'px', ly = n.y + 'px';
+      if (b.style.left !== lx) b.style.left = lx;
+      if (b.style.top !== ly) b.style.top = ly;
+      setAttr(b, 'aria-level', String(t.level));
+      setAttr(b, 'aria-setsize', String(t.size));
+      setAttr(b, 'aria-posinset', String(t.pos));
+      setAttr(b, 'aria-expanded', t.hasChildren ? (n.collapsed ? 'false' : 'true') : null);
+      setAttr(b, 'aria-label', ideaLabel(n));
+    }
+
+    function setClass(b, cls, on) {
+      if (b.classList.contains(cls) !== on) b.classList.toggle(cls, on);
+    }
+
+    // Draw one idea's button now, whether or not it is near the view: the
+    // selection, the keyboard and Find always land on a real button.
+    function drawIdea(id) {
+      var n = id && M.node(d, id);
+      if (!n) return null;
+      var b = els.get(id);
+      if (b) return b;
+      var sibs = n.parent == null ? [n] : M.childrenOf(d, n.parent);
+      var i = sibs.indexOf(n);
+      b = newEl(n);
+      paintIdea(b, {
+        node: n, level: M.depth(d, id) + 1, pos: i < 0 ? 1 : i + 1, size: sibs.length,
+        hasChildren: M.childrenOf(d, id).length > 0,
+      });
+      return b;
+    }
+
+    // One label per link on the page; a drag moves them, so focus stays put.
+    function syncLinkLabels() {
+      var culled = M.ideaCount(d) > CULL_AT;
+      var want = {};
+      M.links(d).forEach(function (l) {
+        if (culled && !els.has(l.from) && !els.has(l.to)) return;
+        want[l.id] = true;
+        if (linkEls.get(l.id)) return;
+        var b = el('button', 'link-label');
+        b.type = 'button';
+        b.dataset.link = l.id;
+        labelLayer.appendChild(b);
+        linkEls.set(l.id, b);
+      });
+      linkEls.forEach(function (b, id) {
+        if (want[id]) return;
+        if (b.parentNode) b.parentNode.removeChild(b);
+        linkEls.delete(id);
+      });
+    }
+
+    // ── What is near enough to draw (#38) ───────────────────────────────
+    // Above CULL_AT ideas, ideas far outside the view keep no button and no
+    // branch, with half a screen of margin so one is in place before it
+    // scrolls in. The selected idea, the keyboard's, the one being edited,
+    // the drag's own subtree, ideas others hold and the current find match
+    // are always drawn.
+    var CULL_AT = 300;
+
+    function viewRect() {
+      var W = rootEl.clientWidth || 1, H = rootEl.clientHeight || 1;
+      var x0 = -tx / scale, y0 = -ty / scale;
+      var w = W / scale, h = H / scale;
+      return { x0: x0 - w / 2, y0: y0 - h / 2, x1: x0 + w * 1.5, y1: y0 + h * 1.5 };
+    }
+
+    function alwaysDrawn(id) {
+      if (id === 'root' || id === selectedId || id === focusId) return true;
+      if (editing && (editing.id === id || editing.parentId === id)) return true;
+      if (gesture && gesture.ids && gesture.ids[id]) return true;
+      for (var i = 0; i < peers.length; i++) if (peers[i].selectedId === id) return true;
+      var cur = find && find.matches[find.index];
+      if (cur && cur.kind === 'idea' && cur.id === id) return true;
+      if (ghosts && ghosts[id]) return true;
+      return false;
+    }
+
+    function shouldDraw(n, vr) {
+      if (M.ideaCount(d) <= CULL_AT) return true;
+      if (alwaysDrawn(n.id)) return true;
+      var sz = sizes.get(n.id) || M.estimatedSize(d, n);
+      var at = posOf(n);
+      // A generous box around the anchor: a pill reaches half its width
+      // either side, an outer idea most of its width one way.
+      return !(at[0] + sz.w < vr.x0 || at[0] - sz.w > vr.x1 ||
+        at[1] + sz.h < vr.y0 || at[1] - sz.h > vr.y1);
+    }
+
+    // Bring the page up to date with the view: draw what came near, drop
+    // what went away. Throttled to five times a second, then once more a
+    // moment after the view stops moving.
+    var lastCull = 0, cullTimer = 0;
+
+    function cullSoon() {
+      if (M.ideaCount(d) <= CULL_AT) return;
+      var now = performance.now();
+      if (!cullTimer && now - lastCull >= 200) cull();
+      clearTimeout(cullTimer);
+      cullTimer = setTimeout(function () { cullTimer = 0; cull(); }, 150);
+    }
+
+    function cull() {
+      if (M.ideaCount(d) <= CULL_AT || gesture || tween) return;
+      lastCull = performance.now();
+      var t0 = perfStart();
+      var vr = viewRect(), added = false;
+      var keep = {};
+      M.treeOrder(d).forEach(function (t) {
+        var n = t.node;
+        if (!shouldDraw(n, vr)) { removeIdeaEl(n.id); return; }
+        keep[n.id] = true;
+        var b = els.get(n.id);
+        if (b && b.getAttribute('role') !== 'treeitem') return; // being edited
+        if (!b) { b = newEl(n); paintIdea(b, t); added = true; }
+      });
+      els.forEach(function (b, id) {
+        if (id === '__draft' || keep[id]) return;
+        if (editing && editing.id === id) return;
+        removeIdeaEl(id);
+      });
+      syncLinkLabels();
+      if (added) { renderPeers(); refreshFind(); }
+      syncTree();
+      drawBranches();
+      perfEnd('cull', t0);
     }
 
     var branchFrame = 0;
@@ -1157,9 +1329,21 @@
       });
     }
 
+    // The visible size of an idea, not its enlarged tap box: clientWidth and
+    // clientHeight leave out the transparent border (and .idea-sub adds back
+    // the underline it draws below). Branches and layout use this.
+    function inkSize(b) {
+      var w = b.clientWidth, h = b.clientHeight;
+      if (b.classList.contains('idea-sub')) h += 3;
+      return { w: w, h: h };
+    }
+
     function widthOf(n) {
       var b = els.get(n.id);
-      return b ? b.offsetWidth : 80;
+      if (b && b.clientWidth) return inkSize(b).w;
+      var s = sizes.get(n.id);
+      if (s) return s.w;
+      return n.id === '__draft' ? 80 : M.estimatedSize(d, n).w;
     }
 
     // Where an idea's branch leaves it: the centre of a pill, or the
@@ -1172,61 +1356,158 @@
       return [right ? at[0] + widthOf(n) : at[0] - widthOf(n), at[1]];
     }
 
-    function drawBranches() {
-      var paths = '';
-      // The idea being typed draws its branch too, so it grows out of its
-      // parent as words go in.
-      if (editing && !editing.id) {
-        var dp = M.node(d, editing.parentId);
-        if (dp) {
-          var ds = edgeStart(dp);
-          var ddep = M.depth(d, editing.parentId) + 1;
-          var dw = ddep === 1 ? 'w1' : ddep === 2 ? 'w2' : 'w3';
-          var dc = editing.parentId === 'root'
-            ? M.pickFreeColor(d, editing.x >= 0 ? 1 : -1)
-            : M.branchColor(d, editing.parentId);
-          var dmx = (ds[0] + editing.x) / 2;
-          paths += '<path class="' + dw + ' ' + COLOR_CLASSES[dc == null ? 0 : dc] +
-            '" d="M' + ds[0] + ' ' + ds[1] + 'C' + dmx + ' ' + ds[1] + ', ' +
-            dmx + ' ' + editing.y + ', ' + editing.x + ' ' + editing.y + '"/>';
-        }
+    var SVG_NS = 'http://www.w3.org/2000/svg';
+    var branchEls = new Map(); // idea id -> its branch path
+    var linkLineEls = new Map(); // link id -> its line path
+    var draftPathEl = null; // the branch under an idea being typed
+
+    function pathEl(map, id) {
+      var p = map.get(id);
+      if (!p) {
+        p = document.createElementNS(SVG_NS, 'path');
+        svg.appendChild(p);
+        map.set(id, p);
       }
+      return p;
+    }
+
+    function setPath(p, cls, dstr) {
+      if (p.getAttribute('d') !== dstr) p.setAttribute('d', dstr);
+      if (p.getAttribute('class') !== cls) p.setAttribute('class', cls);
+    }
+
+    function dropEl(map, id) {
+      var p = map.get(id);
+      if (!p) return;
+      if (p.parentNode) p.parentNode.removeChild(p);
+      map.delete(id);
+    }
+
+    // The branch that arrives at an idea: drawn from where its parent's
+    // line leaves the parent to the idea's own anchor, thin as it goes out.
+    function drawBranchPath(n) {
+      if (n.id === 'root' || !n.parent) return;
+      var from = M.node(d, n.parent);
+      if (!from) return;
+      var depth = M.depth(d, n.id);
+      var w = depth === 1 ? 'w1' : depth === 2 ? 'w2' : 'w3';
+      var c = M.branchColor(d, n.id);
+      var cls = w + ' ' + COLOR_CLASSES[c == null ? 0 : c];
+      if (focusId && !underFocus(n.id)) cls += ' dim';
+      if (ghosts && ghosts[n.id]) cls += ' ghost';
+      var s = edgeStart(from);
+      var np = posOf(n);
+      var mx = (s[0] + np[0]) / 2;
+      setPath(pathEl(branchEls, n.id), cls,
+        'M' + s[0] + ' ' + s[1] + 'C' + mx + ' ' + s[1] + ', ' +
+        mx + ' ' + np[1] + ', ' + np[0] + ' ' + np[1]);
+    }
+
+    // A branch stays while either end has a button on the page.
+    function branchWanted(n) {
+      return M.ideaCount(d) <= CULL_AT || els.has(n.id) || els.has(n.parent);
+    }
+
+    // The idea being typed draws its branch too, so it grows out of its
+    // parent as words go in.
+    function drawDraftPath() {
+      var on = !!(editing && !editing.id && M.node(d, editing.parentId));
+      if (!on) {
+        if (draftPathEl && draftPathEl.parentNode) draftPathEl.parentNode.removeChild(draftPathEl);
+        draftPathEl = null;
+        return;
+      }
+      var dp = M.node(d, editing.parentId);
+      var ds = edgeStart(dp);
+      var ddep = M.depth(d, editing.parentId) + 1;
+      var dw = ddep === 1 ? 'w1' : ddep === 2 ? 'w2' : 'w3';
+      var dc = editing.parentId === 'root'
+        ? M.pickFreeColor(d, editing.x >= 0 ? 1 : -1)
+        : M.branchColor(d, editing.parentId);
+      var dmx = (ds[0] + editing.x) / 2;
+      if (!draftPathEl) { draftPathEl = document.createElementNS(SVG_NS, 'path'); svg.appendChild(draftPathEl); }
+      setPath(draftPathEl, dw + ' ' + COLOR_CLASSES[dc == null ? 0 : dc],
+        'M' + ds[0] + ' ' + ds[1] + 'C' + dmx + ' ' + ds[1] + ', ' +
+        dmx + ' ' + editing.y + ', ' + editing.x + ' ' + editing.y);
+    }
+
+    // A link's line, when its two boxes leave a gap to draw in.
+    function drawLinkLine(l) {
+      var seg = linkSegment(l);
+      if (!seg || !seg.line) { dropEl(linkLineEls, l.id); return; }
+      var ln = seg.line;
+      var ldim = focusId && !(underFocus(l.from) && underFocus(l.to)) ? ' dim' : '';
+      setPath(pathEl(linkLineEls, l.id), 'link-line' + ldim,
+        'M' + ln[0] + ' ' + ln[1] + 'L' + ln[2] + ' ' + ln[3]);
+    }
+
+    // Its name (or dot) sits on the line's middle, and stays even when the
+    // line cannot be drawn, lifted over the ideas so it can always be tapped.
+    function placeLinkLabel(l) {
+      var b = linkEls.get(l.id);
+      var seg = linkSegment(l);
+      if (!b || !seg) return;
+      b.style.left = seg.mid[0] + 'px';
+      b.style.top = seg.mid[1] + 'px';
+      b.classList.toggle('is-over', !seg.line);
+    }
+
+    // Measure the ideas whose words or classes changed, in one read pass
+    // before anything is written, so a culled idea still has a size.
+    function measureBatch() {
+      if (!dirtySize.size) return;
+      dirtySize.forEach(function (id) {
+        var b = els.get(id);
+        if (!b) return; // not drawn: the estimate stands until it is
+        var ink = inkSize(b), w = ink.w, h = ink.h;
+        if (w && h) { sizes.set(id, { w: w, h: h }); dirtySize.delete(id); }
+      });
+    }
+
+    function drawBranches() {
+      var t0 = perfStart();
+      measureBatch();
+      var culled = M.ideaCount(d) > CULL_AT;
+      var live = culled ? new Set() : null;
       M.nodes(d).forEach(function (n) {
         if (n.id === 'root' || !n.parent) return;
-        var from = M.node(d, n.parent);
-        if (!from) return;
-        var s = edgeStart(from);
-        var depth = M.depth(d, n.id);
-        var w = depth === 1 ? 'w1' : depth === 2 ? 'w2' : 'w3';
-        var c = M.branchColor(d, n.id);
-        var cls = w + ' ' + COLOR_CLASSES[c == null ? 0 : c];
-        var np = posOf(n);
-        var mx = (s[0] + np[0]) / 2;
-        if (focusId && !underFocus(n.id)) cls += ' dim';
-        if (ghosts && ghosts[n.id]) cls += ' ghost';
-        paths += '<path class="' + cls + '" d="M' + s[0] + ' ' + s[1] +
-          'C' + mx + ' ' + s[1] + ', ' + mx + ' ' + np[1] + ', ' + np[0] + ' ' + np[1] + '"/>';
+        if (culled && !branchWanted(n)) return;
+        drawBranchPath(n);
+        if (live) live.add(n.id);
       });
+      if (live) branchEls.forEach(function (p, id) {
+        if (!live.has(id)) dropEl(branchEls, id);
+      });
+      drawDraftPath();
+      var linkLive = culled ? new Set() : null;
       M.links(d).forEach(function (l) {
-        var seg = linkSegment(l);
-        var b = linkEls.get(l.id);
-        if (seg && seg.line) {
-          var ln = seg.line;
-          var ldim = focusId && !(underFocus(l.from) && underFocus(l.to)) ? ' dim' : '';
-          paths += '<path class="link-line' + ldim + '" d="M' + ln[0] + ' ' + ln[1] + 'L' + ln[2] + ' ' + ln[3] + '"/>';
-        }
-        // The label stays even when the line cannot be drawn, lifted over
-        // the overlapping ideas, so the link can always be tapped to rename
-        // or delete it.
-        if (b && seg) {
-          b.style.left = seg.mid[0] + 'px';
-          b.style.top = seg.mid[1] + 'px';
-          b.classList.toggle('is-over', !seg.line);
-        }
+        if (culled && !els.has(l.from) && !els.has(l.to)) return;
+        drawLinkLine(l);
+        placeLinkLabel(l);
+        if (linkLive) linkLive.add(l.id);
       });
-      svg.innerHTML = paths; // coordinates and class names only, never user text
+      if (linkLive) linkLineEls.forEach(function (p, id) {
+        if (!linkLive.has(id)) dropEl(linkLineEls, id);
+      });
       placeMenu(); // the selected idea may have moved or changed size
       drawMinimap();
+      perfEnd('redraw', t0);
+    }
+
+    // During a drag only the moved subtree's branches and the links that
+    // touch it are redrawn, so every pointermove stays cheap on a big map.
+    function drawBranchesFor(ids) {
+      var t0 = perfStart();
+      for (var id in ids) {
+        var n = M.node(d, id);
+        if (n) drawBranchPath(n);
+      }
+      M.links(d).forEach(function (l) {
+        if (!ids[l.from] && !ids[l.to]) return;
+        drawLinkLine(l);
+        placeLinkLabel(l);
+      });
+      perfEnd('drag redraw', t0);
     }
 
     // The straight line between two linked ideas, from where it leaves one
@@ -1264,6 +1545,9 @@
 
     function applyTransform() {
       world.style.transform = 'translate(' + tx + 'px, ' + ty + 'px) scale(' + scale + ')';
+      // The hit padding around each idea and link tag is this many world px
+      // so it is always 44 screen px, however far the map is zoomed out.
+      world.style.setProperty('--tap', (44 / scale) + 'px');
       rootEl.style.backgroundPosition = tx + 'px ' + ty + 'px';
       var pc = Math.round(scale * 100) + '%';
       zoomLevel.textContent = pc;
@@ -1272,6 +1556,7 @@
       placeMenu();
       placeMinimapView();
       scheduleSaveView();
+      cullSoon(); // big maps draw what came near and drop what went away
     }
 
     // ── The remembered viewport ──────────────────────────────────────────
@@ -1347,9 +1632,16 @@
     // a pill is centred on its anchor, an outer idea's text runs left or right
     // of it, by the side it grows on.
     function boxOf(n) {
+      if (!n) return null;
       var b = els.get(n.id);
-      if (!b) return null;
-      var w = b.offsetWidth, hh = b.offsetHeight;
+      var sz = sizes.get(n.id);
+      // An idea off the view keeps no button, but its box still comes from
+      // its cached or estimated size, so links, Fit and the minimap see it.
+      if (!b && !sz && n.id !== '__draft' && !M.node(d, n.id)) return null;
+      var ink = b ? inkSize(b) : null;
+      var w = ink ? ink.w : (sz ? sz.w : M.estimatedSize(d, n).w);
+      var hh = ink ? ink.h : (sz ? sz.h : M.estimatedSize(d, n).h);
+      if (!w || !hh) { var e = M.estimatedSize(d, n); w = w || e.w; hh = hh || e.h; }
       var at = posOf(n);
       var x0;
       if (M.isPill(d, n.id)) x0 = at[0] - w / 2;
@@ -1437,6 +1729,7 @@
     function centerOn(id) {
       var n = id && M.node(d, id);
       if (!n) return;
+      if (!els.get(id)) drawIdea(id);
       var box = boxOf(n);
       var cx = box ? box.x + box.w / 2 : n.x, cy = box ? box.y + box.h / 2 : n.y;
       var W = rootEl.clientWidth, H = rootEl.clientHeight;
@@ -1450,6 +1743,7 @@
     // preventScroll: reveal() pans by the view's own rules instead.
     function focusIdea(id) {
       var b = id && els.get(id);
+      if (!b && id) b = drawIdea(id); // the keyboard always reaches a real button
       if (b) b.focus({ preventScroll: true });
       else rootEl.focus({ preventScroll: true });
     }
@@ -1575,7 +1869,13 @@
     function m2x(wx) { return (wx - mmOx) * mmScale; }
     function m2y(wy) { return (wy - mmOy) * mmScale; }
 
+    var mmRebuild = 0;
     function drawMinimap() {
+      if (minimap.hidden || mmRebuild) return;
+      mmRebuild = requestAnimationFrame(function () { mmRebuild = 0; drawMinimapNow(); });
+    }
+
+    function drawMinimapNow() {
       if (minimap.hidden) return;
       var b = bounds();
       var s = Math.min((MM_W - MM_PAD * 2) / Math.max(b.w, 1), (MM_H - MM_PAD * 2) / Math.max(b.h, 1), 0.5);
@@ -1692,6 +1992,9 @@
         gesture.positions = M.subtree(d, dragId).map(function (n) {
           return { id: n.id, x: n.x, y: n.y };
         });
+        // The branch paths a drag redraws each frame: its own subtree only.
+        gesture.ids = {};
+        gesture.positions.forEach(function (p) { gesture.ids[p.id] = true; });
         gesture.sibs = null;
         gesture.rank0 = -1;
         if (dragId !== 'root') {
@@ -1753,7 +2056,7 @@
           var b = els.get(n.id);
           if (b) { b.style.left = n.x + 'px'; b.style.top = n.y + 'px'; }
         });
-        drawBranchesSoon();
+        drawBranchesFor(gesture.ids);
         updateDrop(e);
       }
     });
@@ -1838,8 +2141,9 @@
       }
       selectedId = id;
       linkingFrom = null;
-      if (id && els.get(id)) {
-        els.get(id).classList.add('is-selected');
+      if (id) {
+        var b = els.get(id) || drawIdea(id); // a match off the view comes back
+        if (b) b.classList.add('is-selected');
       }
       syncTree(); // aria-selected and the roving tab stop follow the ring
       renderBar();
@@ -1869,7 +2173,7 @@
         selLine.appendChild(el('span', 'sel-name', n.text));
         selLine.appendChild(el('span', 'sel-meta', 'Tap another idea to link to it'));
       } else if (full) {
-        selLine.appendChild(el('span', 'sel-meta', 'This map is full (500 ideas)'));
+        selLine.appendChild(el('span', 'sel-meta', 'This map is full (' + M.MAX_NODES + ' ideas)'));
       } else if (n) {
         selLine.appendChild(dotFor(n));
         selLine.appendChild(el('span', 'sel-name', n.text));
@@ -2025,7 +2329,7 @@
       var anchor = selNode() || M.node(d, 'root');
       if (!anchor) return;
       if (M.ideaCount(d) >= M.MAX_NODES) {
-        un.toast('This map is full (500 ideas)');
+        un.toast('This map is full (' + M.MAX_NODES + ' ideas)');
         return;
       }
       var kind = where; // 'child' only for the first idea; then siblings
@@ -2036,7 +2340,7 @@
       }
       sheetForm('Idea', 'e.g. Book a table', '', 'Add idea', M.MAX_TEXT, function (text) {
         if (M.ideaCount(d) >= M.MAX_NODES) {
-          un.toast('This map is full (500 ideas)');
+          un.toast('This map is full (' + M.MAX_NODES + ' ideas)');
           return false;
         }
         if (kind === 'child' && !M.canAddUnder(d, anchor.id)) {
@@ -2107,6 +2411,7 @@
       var b = els.get(id);
       if (b) {
         b.textContent = text;
+        dirtySize.add(id);
         b.setAttribute('aria-label', ideaLabel(M.node(d, id)));
       }
       labelLinks(); // their screen-reader names say which ideas they join
@@ -2123,6 +2428,7 @@
             var bb = els.get(id);
             if (bb) {
               bb.textContent = before;
+              dirtySize.add(id);
               bb.setAttribute('aria-label', ideaLabel(M.node(d, id)));
             }
             labelLinks();
@@ -2225,6 +2531,7 @@
         // placeholder; make it truly empty then.
         if (!ed.textContent && ed.childNodes.length) ed.textContent = '';
         clampText();
+        if (editing) dirtySize.add(editing.id || '__draft');
         drawBranchesSoon(); // the branches follow the editor's width
         updateCount();
         revealEditor();
@@ -2241,6 +2548,7 @@
       }
       updateCount();
       revealEditor();
+      drawBranchesSoon(); // the new idea grows out of its parent at once
     }
 
     // Keep the edit inside its limit on any way in (a drop, autocorrect):

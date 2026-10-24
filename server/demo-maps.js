@@ -191,4 +191,27 @@ function trashedDemoDoc() {
   ]);
 }
 
-module.exports = { demoMaps, lisbonDoc, lisbonVersions, sharedDemoDoc, teamRetroDoc, trashedDemoDoc };
+// The big-map demo (#38): 1511 made-up ideas, ten topics with ten ideas each
+// and fourteen notes under each of those, laid out during the build. It is
+// the same every time, so it is built once and shared. Staging only.
+let bigDoc = null;
+function bigDemoDoc() {
+  if (bigDoc) return JSON.parse(JSON.stringify(bigDoc));
+  const topics = [];
+  for (let i = 1; i <= 10; i++) {
+    const subs = [];
+    for (let j = 1; j <= 10; j++) {
+      const notes = [];
+      for (let k = 1; k <= 14; k++) notes.push('Note ' + i + '.' + j + '.' + k);
+      subs.push(['Topic ' + i + '.' + j, notes]);
+    }
+    topics.push(['Topic ' + i, subs]);
+  }
+  bigDoc = buildDoc('Staging demo: Big map', topics);
+  return JSON.parse(JSON.stringify(bigDoc));
+}
+
+module.exports = {
+  demoMaps, lisbonDoc, lisbonVersions, sharedDemoDoc, teamRetroDoc, trashedDemoDoc,
+  bigDemoDoc,
+};
