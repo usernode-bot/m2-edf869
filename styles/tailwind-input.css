@@ -858,6 +858,25 @@
   }
 
   /* ── The zoom group, the minimap and the focus chip (#25) ── */
+  /* The dev-only readout (#38): with ?perf=1 on the address it sits under
+     the top bar on the left, like the other things floating over the paper.
+     It never takes a press. */
+  .perf-readout {
+    position: absolute;
+    left: 12px;
+    top: 68px;
+    z-index: 15;
+    padding: 6px 10px;
+    background: rgb(var(--surface));
+    border: 1px solid rgb(var(--line));
+    border-radius: 10px;
+    color: rgb(var(--muted));
+    font-size: 14px;
+    line-height: 20px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+  }
+
   /* The zoom group: a small floating column at the bottom right, over the
      paper and out of its way, like the idea menu. canvas.js sets its bottom
      so it clears the bottom bar on a phone. */
