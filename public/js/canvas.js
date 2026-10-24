@@ -134,7 +134,9 @@
   // The loading placeholder and the error state, drawn on the dotted canvas.
   function loadingEl() {
     var c = el('div', 'canvas');
-    c.appendChild(el('div', 'load-pill'));
+    var pill = el('div', 'load-pill');
+    pill.appendChild(el('span', 'text-small text-muted', 'Loading…'));
+    c.appendChild(pill);
     return c;
   }
 

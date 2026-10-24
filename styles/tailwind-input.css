@@ -303,7 +303,16 @@
   .link-label {
     position: absolute;
     transform: translate(-50%, -50%);
-    background: rgb(var(--ground));
+    /* A 44 screen px target (#28 review) without growing the tag: the box
+       grows and the tag is painted by ::after at its usual height. */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: var(--hit-size, 44px);
+    min-height: var(--hit-size, 44px);
+    box-sizing: border-box;
+    isolation: isolate;
+    background: none;
     color: rgb(var(--muted));
     border: 0;
     border-radius: 6px;
@@ -313,6 +322,18 @@
     font-weight: 500;
     white-space: nowrap;
     cursor: pointer;
+  }
+  .link-label::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    z-index: -1;
+    width: 100%;
+    height: 20px;
+    border-radius: 6px;
+    background: rgb(var(--ground));
   }
   /* The tag stays small on the paper; this widens what a finger can hit to
      at least 44 px each way on screen without drawing anything. It is sized
@@ -362,6 +383,11 @@
     position: absolute;
     width: max-content; /* shrink-wrap: the world div is 0 wide on purpose */
     max-width: 236px;
+    /* Every idea is at least a 44 screen px target (#28 review): --hit-size
+       is 44 screen px in world units, set by applyTransform. */
+    min-width: var(--hit-size, 44px);
+    min-height: var(--hit-size, 44px);
+    box-sizing: border-box;
     background: none;
     border: 0;
     padding: 0;
@@ -377,6 +403,10 @@
   .idea-main {
     transform: translate(-50%, -50%);
     border-radius: 999px;
+    /* The box may be grown to the 44 px target; the words stay centred. */
+    display: flex;
+    align-items: center;
+    justify-content: center;
     /* Text still wraps inside max-width; overflow stays visible so the
        invisible 44 px tap area below is not clipped by the pill. */
     overflow: visible;
@@ -403,7 +433,19 @@
     font-size: 14px;
     line-height: 20px;
     padding: 0 2px 2px;
+    display: flex;
+    align-items: center;
+    border-bottom: 0;
+  }
+  /* The underline hugs the words, not the grown 44 px box (#28 review). */
+  .idea-sub::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: calc(50% - 11px);
     border-bottom: 3px solid;
+    border-color: inherit;
   }
   .idea-sub.left {
     transform: translate(-100%, -50%);
@@ -1169,6 +1211,9 @@
     left: 50%;
     top: 50%;
     transform: translate(-50%, -50%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
     width: 180px;
     height: 52px;
     border-radius: 999px;
