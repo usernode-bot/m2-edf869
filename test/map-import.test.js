@@ -169,7 +169,7 @@ test('the XML reader never expands a custom entity and decodes the standard ones
   assert.strictEqual(root.text, 'A & B A &xxe;');
 });
 
-test('limits: shortening, the ten levels and the five hundred ideas', () => {
+test('limits: shortening, the ten levels and the model\'s node limit', () => {
   const long = 'x'.repeat(130);
   const r = I.read('Root\n  ' + long, 'Long.txt');
   assert.ifError(r.error);
@@ -192,13 +192,22 @@ test('limits: shortening, the ten levels and the five hundred ideas', () => {
   const deepest = Math.max(...deep.doc.nodes.map((n) => M.depth(deep.doc, n.id)));
   assert.strictEqual(deepest, M.MAX_DEPTH);
 
+  // More ideas than the model can hold, so the tail is cut and the summary
+  // says how much came in. The cap is M.MAX_NODES, which a big-map change
+  // raised from 500 to 2000; the sample is a tree, because tidy layout keeps
+  // a tree inside the model's coordinate bounds at this size (one flat column
+  // of 2000 ideas would not fit them).
   const many = ['Root'];
-  for (let i = 1; i < 812; i++) many.push('  Idea ' + i);
+  for (let i = 0; i < 110; i++) {
+    many.push('  Main ' + i);
+    for (let j = 0; j < 18; j++) many.push('    Child ' + i + '.' + j);
+  }
+  const total = many.length;
   const big = I.read(many.join('\n'), 'Big.txt');
   assert.ifError(big.error);
   assert.strictEqual(big.doc.nodes.length, M.MAX_NODES);
-  assert.strictEqual(big.total, 812);
-  assert.ok(I.summaryLines(big).includes('Imported the first 500 ideas of 812.'));
+  assert.strictEqual(big.total, total);
+  assert.ok(I.summaryLines(big).includes('Imported the first ' + M.MAX_NODES + ' ideas of ' + total + '.'));
 });
 
 test('a built doc is a valid, tidy map with colours in order', () => {

@@ -1,7 +1,7 @@
 /* Importing a map from a file or a pasted outline (#28). Pure: no DOM, no
  * network. Each format is read into a small tree, buildDoc fits that tree to
- * the map model's limits (text lengths, 10 levels, 500 ideas), lays it out
- * tidy and validates it with M2Model, and the page POSTs the finished doc.
+ * the map model's limits (text lengths, 10 levels, M.MAX_NODES ideas), lays
+ * it out tidy and validates it with M2Model, and the page POSTs the doc.
  * UMD: window.M2Import, or module.exports for node --test. */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory(require('./map-model'));
